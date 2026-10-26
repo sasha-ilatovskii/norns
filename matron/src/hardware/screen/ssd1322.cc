@@ -1,5 +1,6 @@
 #include "ssd1322.h"
 
+#include <gpiod.h>
 #include <string.h>
 
 #include "event_types.h"
@@ -17,8 +18,8 @@ static struct gpiod_line *gpio_reset;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t ssd1322_pthread_t;
 
-#define SPIDEV_BUFFER_LEN SSD1322_PIXEL_WIDTH *SSD1322_PIXEL_HEIGHT * sizeof(uint8_t)
-#define SURFACE_BUFFER_LEN SSD1322_PIXEL_WIDTH *SSD1322_PIXEL_HEIGHT * sizeof(uint32_t)
+#define SPIDEV_BUFFER_LEN SSD1322_PIXEL_WIDTH * SSD1322_PIXEL_HEIGHT * sizeof(uint8_t)
+#define SURFACE_BUFFER_LEN SSD1322_PIXEL_WIDTH * SSD1322_PIXEL_HEIGHT * sizeof(uint32_t)
 
 int open_spi(const char *path) {
     uint8_t mode = SPI_MODE_0;

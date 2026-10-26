@@ -1,8 +1,16 @@
 -- norns runtime I/O for a CM5 with an Adafruit 2.7-inch 400x240 Sharp Memory
--- Display connected to SPI0 CE0. Copy this file to /home/we/matronrc.lua.
+-- Display data connected to SPI0, with its active-high CS on GPIO25. Copy this
+-- file to /home/we/matronrc.lua.
 
 _boot.add_io('screen:sharp-memory', {
   dev = '/dev/spidev0.0',
+
+  -- RP1 does not accept SPI_CS_HIGH through spidev. GPIO25 is driven directly
+  -- instead; leave CE0/GPIO8 disconnected from the display.
+  -- The RP1 chip is selected by its stable kernel name; its gpiochip number
+  -- may change between kernel releases.
+  cs_chip = 'pinctrl-rp1',
+  cs_line = 25,
 
   -- LS027B7DH01 maximum SPI clock.
   speed_hz = 2000000,

@@ -8,7 +8,9 @@
 #include "hardware/screen/screens.h"
 
 io_ops_t *io_types[] = {
+#ifdef NORNS_CM5
     (io_ops_t *)&screen_sharp_memory_ops,
+#endif
     (io_ops_t *)&enc_gpio_ops,
     (io_ops_t *)&key_gpio_ops,
 

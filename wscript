@@ -65,7 +65,8 @@ def configure(conf):
     conf.check_cfg(package='alsa', args=['--cflags', '--libs'])
     conf.check_cfg(package='libudev', args=['--cflags', '--libs'])
     conf.check_cfg(package='libevdev', args=['--cflags', '--libs'])
-    conf.check_cfg(package='libgpiod', args=['--cflags', '--libs'])
+    if not conf.options.cm5:
+        conf.check_cfg(package='libgpiod', args=['--cflags', '--libs'])
     conf.check_cfg(package='liblo', args=['--cflags', '--libs'])
     conf.check_cfg(package='cairo', args=['--cflags', '--libs'])
     conf.check_cfg(package='cairo-ft', args=['--cflags', '--libs'])
@@ -109,6 +110,8 @@ def configure(conf):
         conf.fatal('--cm5 requires --release')
     if conf.options.cm5 and conf.env.DEST_CPU not in ('aarch64', 'arm64'):
         conf.fatal('--cm5 requires a 64-bit AArch64 compiler and operating system')
+    if conf.options.cm5:
+        conf.define('NORNS_CM5', True)
     conf.env.NORNS_CM5 = conf.options.cm5
 
     if conf.options.enable_debug:

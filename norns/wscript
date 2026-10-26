@@ -17,11 +17,7 @@ def build(bld):
         '../matron/src/hardware/io.cc',
         '../matron/src/hardware/platform.cc',
         '../matron/src/hardware/screen.cc',
-        '../matron/src/hardware/screen/sharp_memory.cc',
-        '../matron/src/hardware/screen/sharp_memory_dither.cc',
-        '../matron/src/hardware/screen/sharp_memory_protocol.cc',
         '../matron/src/hardware/stat.cc',
-	    '../matron/src/hardware/screen/ssd1322.cc',
         '../matron/src/hardware/input/gpio.cc',
         '../matron/src/args.cc',
         '../matron/src/events.cc',
@@ -45,6 +41,16 @@ def build(bld):
         '../matron/src/clocks/clock_scheduler.cc',
         '../matron/src/time_since.cc',
     ]
+
+    if bld.env.NORNS_CM5:
+        matron_sources += [
+            '../matron/src/hardware/screen/sharp_memory.cc',
+            '../matron/src/hardware/screen/sharp_memory_dither.cc',
+            '../matron/src/hardware/screen/sharp_memory_protocol.cc',
+            '../matron/src/hardware/screen/ssd1322_stub.cc',
+        ]
+    else:
+        matron_sources += ['../matron/src/hardware/screen/ssd1322.cc']
 
     if bld.env.NORNS_DESKTOP:
         matron_sources += [
@@ -85,7 +91,6 @@ def build(bld):
         'ALSA',
         'LIBUDEV',
         'LIBEVDEV',
-        'LIBGPIOD',
         'CAIRO',
         'CAIRO-FT',
         'LUA53',
@@ -97,6 +102,9 @@ def build(bld):
         'AVAHI-COMPAT-LIBDNS_SD',
         'JACK',
     ]
+
+    if not bld.env.NORNS_CM5:
+        matron_use.append('LIBGPIOD')
 
     if bld.env.NORNS_DESKTOP:
         matron_libs.append('SDL2')

@@ -3,8 +3,6 @@
 #include <arm_neon.h>
 #include <cairo.h>
 #include <fcntl.h>
-#include <gpiod.h>
-#include <linux/gpio.h>
 #include <linux/spi/spidev.h>
 #include <linux/types.h>
 #include <math.h>

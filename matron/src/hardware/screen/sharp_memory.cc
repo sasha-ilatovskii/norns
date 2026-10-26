@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/gpio.h>
 #include <linux/spi/spidev.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -26,7 +27,10 @@
 
 typedef struct _screen_sharp_memory_priv {
     char *dev;
+    char *cs_chip;
+    unsigned int cs_line_offset;
     int spi_fd;
+    int cs_fd;
     uint8_t *frame;
     size_t frame_size;
     uint8_t *packet;
@@ -105,14 +109,33 @@ static int screen_sharp_memory_config(matron_io_t *io, lua_State *l) {
     screen_sharp_memory_priv_t *priv = (screen_sharp_memory_priv_t *)io->data;
     memset(priv, 0, sizeof(*priv));
     priv->spi_fd = -1;
+    priv->cs_fd = -1;
 
     if (config_string(l, 2, "dev", &priv->dev, "/dev/spidev0.0") != 0)
         return -1;
+    if (config_string(l, 2, "cs_chip", &priv->cs_chip, "pinctrl-rp1") != 0) {
+        free(priv->dev);
+        priv->dev = NULL;
+        return -1;
+    }
+
+    const int cs_line = config_integer(l, 2, "cs_line", 25);
+    if (cs_line < 0) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) 'cs_line' must be non-negative\n");
+        free(priv->cs_chip);
+        free(priv->dev);
+        priv->cs_chip = NULL;
+        priv->dev = NULL;
+        return -1;
+    }
+    priv->cs_line_offset = (unsigned int)cs_line;
 
     priv->fps = config_integer(l, 2, "fps", 15);
     if (priv->fps < 1 || priv->fps > 20) {
         fprintf(stderr, "ERROR (screen:sharp-memory) 'fps' must be between 1 and 20\n");
+        free(priv->cs_chip);
         free(priv->dev);
+        priv->cs_chip = NULL;
         priv->dev = NULL;
         return -1;
     }
@@ -120,7 +143,9 @@ static int screen_sharp_memory_config(matron_io_t *io, lua_State *l) {
     const int speed_hz = config_integer(l, 2, "speed_hz", SHARP_MEMORY_DEFAULT_SPEED_HZ);
     if (speed_hz < 100000 || speed_hz > SHARP_MEMORY_DEFAULT_SPEED_HZ) {
         fprintf(stderr, "ERROR (screen:sharp-memory) 'speed_hz' must be between 100000 and 2000000\n");
+        free(priv->cs_chip);
         free(priv->dev);
+        priv->cs_chip = NULL;
         priv->dev = NULL;
         return -1;
     }
@@ -132,15 +157,30 @@ static int screen_sharp_memory_config(matron_io_t *io, lua_State *l) {
 }
 
 static bool spi_write_transaction(screen_sharp_memory_priv_t *priv, const uint8_t *data, size_t size) {
+    struct gpio_v2_line_values cs_value = {};
+    cs_value.mask = 1;
+    cs_value.bits = 1;
+    if (ioctl(priv->cs_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &cs_value) < 0)
+        return false;
+
     ssize_t written;
     do {
         written = write(priv->spi_fd, data, size);
     } while (written < 0 && errno == EINTR);
 
+    int transaction_errno = 0;
     if (written < 0)
-        return false;
-    if ((size_t)written != size) {
-        errno = EIO;
+        transaction_errno = errno;
+    else if ((size_t)written != size)
+        transaction_errno = EIO;
+
+    cs_value.bits = 0;
+    if (ioctl(priv->cs_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &cs_value) < 0 &&
+        transaction_errno == 0)
+        transaction_errno = errno;
+
+    if (transaction_errno != 0) {
+        errno = transaction_errno;
         return false;
     }
     return true;
@@ -213,8 +253,78 @@ static void close_spi(screen_sharp_memory_priv_t *priv) {
     }
 }
 
+static void close_cs(screen_sharp_memory_priv_t *priv) {
+    if (priv->cs_fd >= 0) {
+        struct gpio_v2_line_values cs_value = {};
+        cs_value.mask = 1;
+        ioctl(priv->cs_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &cs_value);
+        close(priv->cs_fd);
+        priv->cs_fd = -1;
+    }
+}
+
+static int open_gpio_chip(const char *selector) {
+    if (selector[0] == '/')
+        return open(selector, O_RDWR | O_CLOEXEC);
+
+    char path[64];
+    const int path_length = snprintf(path, sizeof(path), "/dev/%s", selector);
+    if (path_length > 0 && path_length < (int)sizeof(path)) {
+        const int fd = open(path, O_RDWR | O_CLOEXEC);
+        if (fd >= 0)
+            return fd;
+    }
+
+    for (unsigned int index = 0; index < 256; ++index) {
+        snprintf(path, sizeof(path), "/dev/gpiochip%u", index);
+        const int fd = open(path, O_RDWR | O_CLOEXEC);
+        if (fd < 0)
+            continue;
+
+        struct gpiochip_info info = {};
+        if (ioctl(fd, GPIO_GET_CHIPINFO_IOCTL, &info) == 0 &&
+            (strcmp(selector, info.name) == 0 || strcmp(selector, info.label) == 0))
+            return fd;
+        close(fd);
+    }
+
+    errno = ENODEV;
+    return -1;
+}
+
+static int configure_cs(screen_sharp_memory_priv_t *priv) {
+    const int chip_fd = open_gpio_chip(priv->cs_chip);
+    if (chip_fd < 0) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) cannot find GPIO chip '%s': %s\n",
+                priv->cs_chip, strerror(errno));
+        return -1;
+    }
+
+    struct gpio_v2_line_request request = {};
+    request.offsets[0] = priv->cs_line_offset;
+    request.num_lines = 1;
+    request.config.flags = GPIO_V2_LINE_FLAG_OUTPUT;
+    request.config.num_attrs = 1;
+    request.config.attrs[0].attr.id = GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES;
+    request.config.attrs[0].mask = 1;
+    strncpy(request.consumer, "norns-sharp-memory-cs", sizeof(request.consumer) - 1);
+
+    if (ioctl(chip_fd, GPIO_V2_GET_LINE_IOCTL, &request) < 0) {
+        const int request_errno = errno;
+        close(chip_fd);
+        fprintf(stderr, "ERROR (screen:sharp-memory) cannot use %s line %u for CS: %s\n",
+                priv->cs_chip, priv->cs_line_offset, strerror(request_errno));
+        errno = request_errno;
+        return -1;
+    }
+
+    close(chip_fd);
+    priv->cs_fd = request.fd;
+    return 0;
+}
+
 static int configure_spi(screen_sharp_memory_priv_t *priv) {
-    uint8_t mode = SPI_MODE_0 | SPI_CS_HIGH;
+    uint8_t mode = SPI_MODE_0;
     uint8_t bits_per_word = 8;
 
     if (ioctl(priv->spi_fd, SPI_IOC_WR_MODE, &mode) < 0 ||
@@ -225,13 +335,6 @@ static int configure_spi(screen_sharp_memory_priv_t *priv) {
         return -1;
     }
 
-    uint8_t actual_mode = 0;
-    if (ioctl(priv->spi_fd, SPI_IOC_RD_MODE, &actual_mode) < 0 ||
-        (actual_mode & SPI_CS_HIGH) == 0) {
-        fprintf(stderr, "ERROR (screen:sharp-memory) %s does not support active-high chip select\n",
-                priv->dev);
-        return -1;
-    }
     return 0;
 }
 
@@ -250,6 +353,10 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
         close_spi(priv);
         return -1;
     }
+    if (configure_cs(priv) != 0) {
+        close_spi(priv);
+        return -1;
+    }
 
     priv->frame_size = (SHARP_MEMORY_WIDTH * SHARP_MEMORY_HEIGHT) / 8;
     priv->packet_size = sharp_memory_encoded_rows_size(
@@ -262,6 +369,7 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
         free(priv->frame);
         priv->packet = NULL;
         priv->frame = NULL;
+        close_cs(priv);
         close_spi(priv);
         return -1;
     }
@@ -273,6 +381,7 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
         free(priv->frame);
         priv->packet = NULL;
         priv->frame = NULL;
+        close_cs(priv);
         close_spi(priv);
         return -1;
     }
@@ -285,6 +394,7 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
         free(priv->frame);
         priv->packet = NULL;
         priv->frame = NULL;
+        close_cs(priv);
         close_spi(priv);
         return -1;
     }
@@ -298,13 +408,15 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
         free(priv->frame);
         priv->packet = NULL;
         priv->frame = NULL;
+        close_cs(priv);
         close_spi(priv);
         return -1;
     }
 
     fprintf(stderr,
-            "screen:sharp-memory: %s %dx%d, %u Hz SPI, %d fps, dither=bayer8, invert=%s, stretch=%s\n",
-            priv->dev, SHARP_MEMORY_WIDTH, SHARP_MEMORY_HEIGHT, priv->speed_hz, priv->fps,
+            "screen:sharp-memory: %s %dx%d, CS=%s:%u, %u Hz SPI, %d fps, dither=bayer8, invert=%s, stretch=%s\n",
+            priv->dev, SHARP_MEMORY_WIDTH, SHARP_MEMORY_HEIGHT, priv->cs_chip,
+            priv->cs_line_offset, priv->speed_hz, priv->fps,
             priv->invert ? "yes" : "no", priv->stretch ? "yes" : "no");
     return 0;
 }
@@ -330,8 +442,11 @@ static void screen_sharp_memory_destroy(matron_io_t *io) {
     free(priv->frame);
     priv->packet = NULL;
     priv->frame = NULL;
+    close_cs(priv);
     close_spi(priv);
+    free(priv->cs_chip);
     free(priv->dev);
+    priv->cs_chip = NULL;
     priv->dev = NULL;
 }
 
