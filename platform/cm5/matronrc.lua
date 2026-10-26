@@ -23,8 +23,9 @@ _boot.add_io('screen:sharp-memory', {
   -- for a paper-like black-on-white display.
   invert = false,
 
-  -- false preserves the norns 2:1 aspect ratio (400x200 on a 400x240 panel).
-  -- Set true to use the complete panel at the cost of vertical distortion.
+  -- false maps every 128x64 Cairo pixel to an exact 3x3 panel block, producing
+  -- a centered 384x192 image. Set true to fill the complete 400x240 panel at
+  -- the cost of non-integer scaling and vertical distortion.
   stretch = false,
 })
 

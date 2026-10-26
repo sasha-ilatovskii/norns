@@ -40,8 +40,18 @@ TEST_CASE("All 16 norns levels produce distinct ordered-dither coverage") {
     CHECK(previous_white == 64);
 }
 
-TEST_CASE("Norns surface is centered without changing its aspect ratio") {
+TEST_CASE("Norns surface uses a centered integer scale") {
     const sharp_memory_viewport_t viewport = sharp_memory_fit_viewport(128, 64, 400, 240, false);
+    CHECK(viewport.x == 8);
+    CHECK(viewport.y == 24);
+    CHECK(viewport.width == 384);
+    CHECK(viewport.height == 192);
+    CHECK(viewport.width / 128 == 3);
+    CHECK(viewport.height / 64 == 3);
+}
+
+TEST_CASE("Oversized surfaces retain proportional downscaling") {
+    const sharp_memory_viewport_t viewport = sharp_memory_fit_viewport(800, 400, 400, 240, false);
     CHECK(viewport.x == 0);
     CHECK(viewport.y == 20);
     CHECK(viewport.width == 400);

@@ -97,10 +97,26 @@ sharp_memory_viewport_t sharp_memory_fit_viewport(uint32_t source_width,
         return viewport;
     }
 
-    if ((uint64_t)target_width * source_height <= (uint64_t)target_height * source_width) {
-        viewport.height = (uint32_t)(((uint64_t)target_width * source_height) / source_width);
+    const uint32_t integer_scale_x = target_width / source_width;
+    const uint32_t integer_scale_y = target_height / source_height;
+    const uint32_t integer_scale =
+        integer_scale_x < integer_scale_y ? integer_scale_x : integer_scale_y;
+
+    if (integer_scale > 0) {
+        // Keep every source pixel the same size. For the 128x64 norns surface
+        // on a 400x240 panel this produces a centered 384x192 image, with each
+        // Cairo pixel occupying exactly 3x3 physical pixels.
+        viewport.width = source_width * integer_scale;
+        viewport.height = source_height * integer_scale;
+    } else if ((uint64_t)target_width * source_height <=
+               (uint64_t)target_height * source_width) {
+        // Fall back to proportional downscaling if the source is larger than
+        // the target and no positive integer scale can fit.
+        viewport.height =
+            (uint32_t)(((uint64_t)target_width * source_height) / source_width);
     } else {
-        viewport.width = (uint32_t)(((uint64_t)target_height * source_width) / source_height);
+        viewport.width =
+            (uint32_t)(((uint64_t)target_height * source_width) / source_height);
     }
 
     if (viewport.width == 0)
