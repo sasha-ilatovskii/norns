@@ -65,6 +65,7 @@ def configure(conf):
     conf.check_cfg(package='alsa', args=['--cflags', '--libs'])
     conf.check_cfg(package='libudev', args=['--cflags', '--libs'])
     conf.check_cfg(package='libevdev', args=['--cflags', '--libs'])
+    conf.check_cfg(package='glib-2.0', args=['--cflags', '--libs'], uselib_store='GLIB')
     if not conf.options.cm5:
         conf.check_cfg(package='libgpiod', args=['--cflags', '--libs'])
     conf.check_cfg(package='liblo', args=['--cflags', '--libs'])
