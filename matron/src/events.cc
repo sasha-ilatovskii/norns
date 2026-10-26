@@ -37,6 +37,7 @@ struct ev_q {
 
 struct ev_q evq;
 bool quit;
+static bool screen_refresh_queued;
 
 //----------------------------
 //--- static function declarations
@@ -82,6 +83,9 @@ static union event_data *evq_pop() {
     remque(evn);
     free(evn);
     evq.size -= 1;
+    if (ev->type == EVENT_SCREEN_REFRESH) {
+        screen_refresh_queued = false;
+    }
     return ev;
 }
 
@@ -92,6 +96,7 @@ void events_init(void) {
     evq.size = 0;
     evq.head = NULL;
     evq.tail = NULL;
+    screen_refresh_queued = false;
     pthread_cond_init(&evq.nonempty, NULL);
 }
 
@@ -169,6 +174,14 @@ MATRON_API void event_data_free(union event_data *ev) {
 MATRON_API void event_post(union event_data *ev) {
     assert(ev != NULL);
     pthread_mutex_lock(&evq.lock);
+    if (ev->type == EVENT_SCREEN_REFRESH && screen_refresh_queued) {
+        pthread_mutex_unlock(&evq.lock);
+        event_data_free(ev);
+        return;
+    }
+    if (ev->type == EVENT_SCREEN_REFRESH) {
+        screen_refresh_queued = true;
+    }
     if (evq.size == 0) {
         // signal handler thread to wake up...
         pthread_cond_signal(&evq.nonempty);

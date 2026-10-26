@@ -32,6 +32,7 @@ typedef struct _screen_sharp_memory_priv {
     int spi_fd;
     int cs_fd;
     uint8_t *frame;
+    uint8_t *tx_frame;
     size_t frame_size;
     uint8_t *packet;
     size_t packet_size;
@@ -44,6 +45,7 @@ typedef struct _screen_sharp_memory_priv {
     volatile bool refresh_running;
     pthread_t refresh_thread;
     pthread_mutex_t paint_lock;
+    bool frame_dirty;
     bool write_error_reported;
 } screen_sharp_memory_priv_t;
 
@@ -195,7 +197,7 @@ static bool send_command(screen_sharp_memory_priv_t *priv, uint8_t command) {
     return packet_size != 0 && spi_write_transaction(priv, packet, packet_size);
 }
 
-static bool send_frame(screen_sharp_memory_priv_t *priv) {
+static bool send_frame(screen_sharp_memory_priv_t *priv, const uint8_t *frame) {
     for (uint32_t first_row = 0; first_row < SHARP_MEMORY_HEIGHT;
          first_row += SHARP_MEMORY_ROWS_PER_TRANSFER) {
         uint32_t row_count = SHARP_MEMORY_HEIGHT - first_row;
@@ -204,7 +206,7 @@ static bool send_frame(screen_sharp_memory_priv_t *priv) {
 
         const size_t encoded = sharp_memory_encode_rows(priv->packet,
                                                         priv->packet_size,
-                                                        priv->frame,
+                                                        frame,
                                                         SHARP_MEMORY_WIDTH,
                                                         first_row,
                                                         row_count,
@@ -222,28 +224,72 @@ static void report_write_error(screen_sharp_memory_priv_t *priv) {
     }
 }
 
+static void advance_deadline(struct timespec *deadline, long nanoseconds) {
+    deadline->tv_nsec += nanoseconds;
+    if (deadline->tv_nsec >= 1000000000L) {
+        deadline->tv_sec += deadline->tv_nsec / 1000000000L;
+        deadline->tv_nsec %= 1000000000L;
+    }
+}
+
+static bool deadline_reached(const struct timespec *deadline, const struct timespec *now) {
+    return deadline->tv_sec < now->tv_sec ||
+           (deadline->tv_sec == now->tv_sec && deadline->tv_nsec <= now->tv_nsec);
+}
+
 static void *screen_sharp_memory_refresh(void *data) {
     screen_sharp_memory_priv_t *priv = (screen_sharp_memory_priv_t *)data;
-    struct timespec tick = {
-        .tv_sec = 0,
-        .tv_nsec = 1000000000L / priv->fps,
-    };
+    const long tick_ns = 1000000000L / priv->fps;
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
     int ticks_until_vcom = priv->fps;
+    bool tx_pending = false;
+    bool vcom_pending = false;
 
     while (priv->refresh_running) {
-        event_post(event_data_new(EVENT_SCREEN_REFRESH));
-        clock_nanosleep(CLOCK_MONOTONIC, 0, &tick, NULL);
+        pthread_mutex_lock(&priv->paint_lock);
+        if (priv->frame_dirty) {
+            uint8_t *next_frame = priv->frame;
+            priv->frame = priv->tx_frame;
+            priv->tx_frame = next_frame;
+            priv->frame_dirty = false;
+            tx_pending = true;
+        }
+        pthread_mutex_unlock(&priv->paint_lock);
 
-        if (--ticks_until_vcom <= 0 && priv->refresh_running) {
-            pthread_mutex_lock(&priv->paint_lock);
+        if (--ticks_until_vcom <= 0) {
             priv->vcom = !priv->vcom;
-            if (!send_command(priv, 0))
-                report_write_error(priv);
-            else
-                priv->write_error_reported = false;
-            pthread_mutex_unlock(&priv->paint_lock);
+            vcom_pending = true;
             ticks_until_vcom = priv->fps;
         }
+
+        bool write_ok = true;
+        if (tx_pending) {
+            write_ok = send_frame(priv, priv->tx_frame);
+        } else if (vcom_pending) {
+            write_ok = send_command(priv, 0);
+        }
+
+        if (!write_ok) {
+            report_write_error(priv);
+        } else if (tx_pending || vcom_pending) {
+            tx_pending = false;
+            vcom_pending = false;
+            priv->write_error_reported = false;
+        }
+
+        event_post(event_data_new(EVENT_SCREEN_REFRESH));
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        do {
+            advance_deadline(&deadline, tick_ns);
+        } while (deadline_reached(&deadline, &now));
+
+        int sleep_result;
+        do {
+            sleep_result = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL);
+        } while (sleep_result == EINTR && priv->refresh_running);
     }
     return NULL;
 }
@@ -364,24 +410,30 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
     priv->packet_size = sharp_memory_encoded_rows_size(
         SHARP_MEMORY_WIDTH, SHARP_MEMORY_ROWS_PER_TRANSFER);
     priv->frame = (uint8_t *)malloc(priv->frame_size);
+    priv->tx_frame = (uint8_t *)malloc(priv->frame_size);
     priv->packet = (uint8_t *)malloc(priv->packet_size);
-    if (priv->frame == NULL || priv->packet == NULL) {
+    if (priv->frame == NULL || priv->tx_frame == NULL || priv->packet == NULL) {
         fprintf(stderr, "ERROR (screen:sharp-memory) cannot allocate display buffers\n");
         free(priv->packet);
+        free(priv->tx_frame);
         free(priv->frame);
         priv->packet = NULL;
+        priv->tx_frame = NULL;
         priv->frame = NULL;
         close_cs(priv);
         close_spi(priv);
         return -1;
     }
     memset(priv->frame, 0xff, priv->frame_size);
+    memset(priv->tx_frame, 0xff, priv->frame_size);
 
     if (pthread_mutex_init(&priv->paint_lock, NULL) != 0) {
         fprintf(stderr, "ERROR (screen:sharp-memory) cannot initialize paint lock\n");
         free(priv->packet);
+        free(priv->tx_frame);
         free(priv->frame);
         priv->packet = NULL;
+        priv->tx_frame = NULL;
         priv->frame = NULL;
         close_cs(priv);
         close_spi(priv);
@@ -393,8 +445,10 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
                 priv->dev, strerror(errno));
         pthread_mutex_destroy(&priv->paint_lock);
         free(priv->packet);
+        free(priv->tx_frame);
         free(priv->frame);
         priv->packet = NULL;
+        priv->tx_frame = NULL;
         priv->frame = NULL;
         close_cs(priv);
         close_spi(priv);
@@ -407,8 +461,10 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
         priv->refresh_running = false;
         pthread_mutex_destroy(&priv->paint_lock);
         free(priv->packet);
+        free(priv->tx_frame);
         free(priv->frame);
         priv->packet = NULL;
+        priv->tx_frame = NULL;
         priv->frame = NULL;
         close_cs(priv);
         close_spi(priv);
@@ -441,8 +497,10 @@ static void screen_sharp_memory_destroy(matron_io_t *io) {
         pthread_mutex_destroy(&priv->paint_lock);
     }
     free(priv->packet);
+    free(priv->tx_frame);
     free(priv->frame);
     priv->packet = NULL;
+    priv->tx_frame = NULL;
     priv->frame = NULL;
     close_cs(priv);
     close_spi(priv);
@@ -495,10 +553,7 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
             }
         }
 
-        if (!send_frame(priv))
-            report_write_error(priv);
-        else
-            priv->write_error_reported = false;
+        priv->frame_dirty = true;
     }
 
     pthread_mutex_unlock(&priv->paint_lock);
