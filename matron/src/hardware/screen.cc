@@ -117,8 +117,15 @@ void screen_text_right(const char *s) {
 
 void screen_text_center(const char *s) {
     cairo_text_extents_t extents;
+    double x, y;
     cairo_text_extents(cr, s, &extents);
-    cairo_rel_move_to(cr, -extents.width * 0.5, 0);
+    cairo_get_current_point(cr, &x, &y);
+
+    // Keep pixel fonts on the logical pixel grid. Newer Cairo/FreeType
+    // versions rasterize glyphs placed at half-pixel origins differently,
+    // which can widen centered text and join adjacent labels.
+    x = floor(x - extents.width * 0.5 + 0.5);
+    cairo_move_to(cr, x, y);
     cairo_show_text(cr, s);
 }
 
