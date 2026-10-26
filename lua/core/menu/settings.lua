@@ -69,16 +69,16 @@ m.passdone = function(txt)
   if txt ~= nil then
     if string.len(txt) >= 8 and string.len(txt) < 64 then
       local q = txt:gsub("'", "'\\''")
-      norns.system_cmd("printf '%s\\n' 'we:"..q.."' | sudo chpasswd && echo __ok__", function(out)
+      norns.system_cmd("printf '%s\\n' '"..paths.user..":"..q.."' | sudo chpasswd && echo __ok__", function(out)
         if out:match("__ok__") then print("ssh password changed")
         else print("!! ssh password change failed !!") end
       end)
-      norns.system_cmd("printf '%s\\n' '"..q.."' '"..q.."' | sudo smbpasswd -a we && echo __ok__", function(out)
+      norns.system_cmd("printf '%s\\n' '"..q.."' '"..q.."' | sudo smbpasswd -a "..paths.user.." && echo __ok__", function(out)
         if out:match("__ok__") then print("samba password changed")
         else print("!! samba password change failed !!") end
       end)
       local hotspotpasswd_status;
-      local fd = io.open("home/we/norns/.system.hotspot_password", "w+")
+      local fd = io.open(paths.home.."/norns/.system.hotspot_password", "w+")
       if fd then
         io.output(fd)
         io.write(txt)

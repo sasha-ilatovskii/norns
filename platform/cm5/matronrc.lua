@@ -1,6 +1,6 @@
 -- norns runtime I/O for a CM5 with an Adafruit 2.7-inch 400x240 Sharp Memory
 -- Display data connected to SPI0, with its active-high CS on GPIO25. Copy this
--- file to /home/we/matronrc.lua.
+-- file to ~/matronrc.lua for the account that runs norns.
 
 _boot.add_io('screen:sharp-memory', {
   dev = '/dev/spidev0.0',

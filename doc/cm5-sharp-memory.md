@@ -73,7 +73,7 @@ device belongs to the `gpio` group. Add the norns user to both, then log out and
 back in (or reboot) so the new groups are active:
 
 ```sh
-sudo usermod -aG spi,gpio we
+sudo usermod -aG spi,gpio "$USER"
 ```
 
 Use your actual login name instead of `we` if it differs. Confirm access with:
@@ -125,6 +125,49 @@ Copy the CM5 I/O configuration:
 
 ```sh
 cp ~/norns/platform/cm5/matronrc.lua ~/matronrc.lua
+```
+
+Norns derives its runtime tree from the `HOME` environment variable. Run it as
+the account that owns the checkout and `dust` directory; for the examples in
+this setup that is `me`, so `HOME` must be `/home/me`. Create the writable
+runtime directories once:
+
+```sh
+mkdir -p ~/dust/code ~/dust/audio/tape ~/dust/data
+```
+
+When launching manually, do not use `sudo`: it changes the runtime account and
+may change `HOME`. For a systemd launch, verify both the configured account and
+the process environment:
+
+```sh
+systemctl show norns-main -p User -p Group -p Environment
+pid=$(pgrep -n norns)
+tr '\0' '\n' < "/proc/$pid/environ" | grep -E '^(HOME|USER)='
+```
+
+On this CM5 the expected values are `User=me`, `HOME=/home/me`, and `USER=me`.
+Stock norns service files use the original `we` account and must not be used
+unchanged on an installation owned by `me`.
+
+If `norns-main.service` still contains `we`, create an override with
+`sudo systemctl edit norns-main`:
+
+```ini
+[Service]
+User=me
+Group=me
+Environment=HOME=/home/me
+Environment=USER=me
+ExecStart=
+ExecStart=/home/me/norns/build/ws-wrapper/ws-wrapper ws://*:5555 /home/me/norns/build/norns/norns
+```
+
+Then apply it:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl restart norns-main
 ```
 
 The default configuration uses `/dev/spidev0.0`, line 25 of the `pinctrl-rp1`
@@ -192,7 +235,7 @@ sudo mkdir -p /etc/systemd/system/norns-jack.service.d
 sudo install -m 0644 \
   ~/norns/platform/cm5/systemd/norns-jack.service.d/10-zoom-ams22.conf \
   /etc/systemd/system/norns-jack.service.d/
-sudo usermod -aG audio we
+sudo usermod -aG audio "$USER"
 sudo systemctl daemon-reload
 sudo systemctl restart norns-jack
 ```

@@ -4,6 +4,7 @@
 -- this consists of search patterns lua will use for require('foo')
 
 local home = os.getenv('HOME')
+local user = os.getenv('USER') or home:match('([^/]+)$')
 local norns = home..'/norns/lua'
 local sys = norns..'/?.lua;'
 local core = norns..'/core/?.lua;'
@@ -21,6 +22,7 @@ local tu = require 'tabutil'
 
 _path = {}
 _path.home = home
+_path.user = user
 _path.extn = norns..'/extn/'
 _path.dust = home..'/dust/'
 _path.code = _path.dust..'code/'
