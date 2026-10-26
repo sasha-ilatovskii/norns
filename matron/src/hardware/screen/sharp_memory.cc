@@ -24,6 +24,9 @@
 #define SHARP_MEMORY_HEIGHT 240
 #define SHARP_MEMORY_ROWS_PER_TRANSFER 60
 #define SHARP_MEMORY_DEFAULT_SPEED_HZ 2000000
+#define SHARP_MEMORY_DUMP_TRIGGER "/tmp/dump-sharp-frame"
+#define SHARP_MEMORY_DUMP_PATH "/tmp/sharp-frame.pbm"
+#define SHARP_MEMORY_DUMP_TEMP_PATH "/tmp/sharp-frame.pbm.tmp"
 
 typedef struct _screen_sharp_memory_priv {
     char *dev;
@@ -519,6 +522,76 @@ static void set_pixel(screen_sharp_memory_priv_t *priv, uint32_t x, uint32_t y, 
         priv->frame[offset] &= (uint8_t)~mask;
 }
 
+static bool write_all(int fd, const void *data, size_t size) {
+    const uint8_t *bytes = (const uint8_t *)data;
+    while (size > 0) {
+        ssize_t written = write(fd, bytes, size);
+        if (written < 0) {
+            if (errno == EINTR)
+                continue;
+            return false;
+        }
+        if (written == 0) {
+            errno = EIO;
+            return false;
+        }
+        bytes += written;
+        size -= (size_t)written;
+    }
+    return true;
+}
+
+static void dump_frame_if_requested(const screen_sharp_memory_priv_t *priv) {
+    if (access(SHARP_MEMORY_DUMP_TRIGGER, F_OK) != 0)
+        return;
+
+    // Consume the request before doing any I/O so a failure cannot stall every
+    // subsequent screen refresh.
+    if (unlink(SHARP_MEMORY_DUMP_TRIGGER) != 0 && errno != ENOENT) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) cannot consume dump trigger: %s\n",
+                strerror(errno));
+        return;
+    }
+
+    const int fd = open(SHARP_MEMORY_DUMP_TEMP_PATH,
+                        O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                        0644);
+    if (fd < 0) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) cannot open frame dump: %s\n",
+                strerror(errno));
+        return;
+    }
+
+    static const char header[] = "P4\n400 240\n";
+    bool ok = write_all(fd, header, sizeof(header) - 1);
+    uint8_t row[SHARP_MEMORY_WIDTH / 8];
+    for (uint32_t y = 0; ok && y < SHARP_MEMORY_HEIGHT; ++y) {
+        const uint8_t *source = priv->frame + (size_t)y * sizeof(row);
+        for (size_t x = 0; x < sizeof(row); ++x)
+            row[x] = sharp_memory_frame_byte_to_pbm(source[x]);
+        ok = write_all(fd, row, sizeof(row));
+    }
+
+    int dump_errno = ok ? 0 : errno;
+    if (close(fd) != 0 && ok) {
+        ok = false;
+        dump_errno = errno;
+    }
+    if (ok && rename(SHARP_MEMORY_DUMP_TEMP_PATH, SHARP_MEMORY_DUMP_PATH) != 0) {
+        ok = false;
+        dump_errno = errno;
+    }
+
+    if (!ok) {
+        unlink(SHARP_MEMORY_DUMP_TEMP_PATH);
+        fprintf(stderr, "ERROR (screen:sharp-memory) cannot write frame dump: %s\n",
+                strerror(dump_errno));
+        return;
+    }
+
+    fprintf(stderr, "screen:sharp-memory: captured %s\n", SHARP_MEMORY_DUMP_PATH);
+}
+
 static void screen_sharp_memory_paint(matron_fb_t *fb) {
     screen_sharp_memory_priv_t *priv = (screen_sharp_memory_priv_t *)fb->io.data;
     if (priv->source == NULL || priv->frame == NULL || priv->spi_fd < 0)
@@ -553,6 +626,7 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
             }
         }
 
+        dump_frame_if_requested(priv);
         priv->frame_dirty = true;
     }
 

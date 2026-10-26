@@ -9,6 +9,13 @@ TEST_CASE("Sharp Memory LCD protocol reverses bytes for MSB-first SPI") {
     CHECK(sharp_memory_reverse_byte(0x96) == 0x69);
 }
 
+TEST_CASE("Sharp frame bytes convert to binary PBM polarity and bit order") {
+    CHECK(sharp_memory_frame_byte_to_pbm(0xff) == 0x00); // eight white pixels
+    CHECK(sharp_memory_frame_byte_to_pbm(0x00) == 0xff); // eight black pixels
+    CHECK(sharp_memory_frame_byte_to_pbm(0x01) == 0x7f); // first pixel white
+    CHECK(sharp_memory_frame_byte_to_pbm(0x80) == 0xfe); // last pixel white
+}
+
 TEST_CASE("Sharp Memory LCD protocol encodes a line write") {
     const uint8_t frame[] = {0x01};
     uint8_t output[5] = {};

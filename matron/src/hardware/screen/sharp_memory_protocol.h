@@ -9,6 +9,7 @@
 #define SHARP_MEMORY_CLEAR_COMMAND 0x04
 
 uint8_t sharp_memory_reverse_byte(uint8_t value);
+uint8_t sharp_memory_frame_byte_to_pbm(uint8_t frame_byte);
 
 size_t sharp_memory_encoded_rows_size(uint32_t width, uint32_t row_count);
 

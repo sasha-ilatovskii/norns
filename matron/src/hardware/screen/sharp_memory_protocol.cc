@@ -6,6 +6,12 @@ uint8_t sharp_memory_reverse_byte(uint8_t value) {
     return (uint8_t)(((value & 0xaa) >> 1) | ((value & 0x55) << 1));
 }
 
+uint8_t sharp_memory_frame_byte_to_pbm(uint8_t frame_byte) {
+    // The native frame is LSB-first with 1 meaning white. Binary PBM is
+    // MSB-first with 1 meaning black.
+    return sharp_memory_reverse_byte((uint8_t)~frame_byte);
+}
+
 size_t sharp_memory_encoded_rows_size(uint32_t width, uint32_t row_count) {
     if (width == 0 || (width & 7) != 0 || row_count == 0)
         return 0;

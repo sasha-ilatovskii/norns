@@ -138,6 +138,31 @@ vertical distortion.
 Software VCOM is maintained by matron even when the image does not change.
 Do not leave the display powered for an extended period while matron is stopped.
 
+### Capture the rendered Sharp frame
+
+To diagnose scaling or dithering, request a one-shot dump of the exact 1-bit
+400x240 frame prepared for the panel:
+
+```sh
+touch /tmp/dump-sharp-frame
+```
+
+Cause a screen redraw, for example by turning an encoder. Matron consumes the
+trigger and writes `/tmp/sharp-frame.pbm`. It logs
+`screen:sharp-memory: captured /tmp/sharp-frame.pbm` when the file is complete.
+The trigger is one-shot, so frame capture does not add continuous disk writes.
+
+PBM can be copied directly to another computer or converted to PNG on the CM5:
+
+```sh
+sudo apt install imagemagick
+magick /tmp/sharp-frame.pbm /tmp/sharp-frame.png
+```
+
+The PBM conversion accounts for the panel buffer's opposite bit order and
+white-bit polarity, so the file shows the same black and white pixels sent to
+the display.
+
 ## Zoom AMS-22
 
 The AMS-22 is a USB Audio Class 2.0, two-channel interface with 48 kHz support.
