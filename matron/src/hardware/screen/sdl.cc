@@ -32,15 +32,17 @@ static SDL_Rect windowSize = {
 };
 
 screen_ops_t screen_sdl_ops = {
-    .io_ops.name = "screen:sdl",
-    .io_ops.type = IO_SCREEN,
-    .io_ops.data_size = sizeof(screen_sdl_priv_t),
-    .io_ops.config = screen_sdl_config,
-    .io_ops.setup = screen_sdl_setup,
-    .io_ops.destroy = screen_sdl_destroy,
-
-    .paint = screen_sdl_paint,
-    .bind = screen_sdl_bind,
+    {
+        // .io_ops
+        "screen:sdl",              // .name
+        IO_SCREEN,                  // .type
+        sizeof(screen_sdl_priv_t),  // .data_size
+        screen_sdl_config,          // .config
+        screen_sdl_setup,           // .setup
+        screen_sdl_destroy,         // .destroy
+    },
+    screen_sdl_paint, // .paint
+    screen_sdl_bind,  // .bind
 };
 
 int screen_sdl_config(matron_io_t *io, lua_State *l) {

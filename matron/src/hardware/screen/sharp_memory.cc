@@ -54,15 +54,17 @@ static void screen_sharp_memory_paint(matron_fb_t *fb);
 static void screen_sharp_memory_bind(matron_fb_t *fb, cairo_surface_t *surface);
 
 screen_ops_t screen_sharp_memory_ops = {
-    .io_ops.name = "screen:sharp-memory",
-    .io_ops.type = IO_SCREEN,
-    .io_ops.data_size = sizeof(screen_sharp_memory_priv_t),
-    .io_ops.config = screen_sharp_memory_config,
-    .io_ops.setup = screen_sharp_memory_setup,
-    .io_ops.destroy = screen_sharp_memory_destroy,
-
-    .paint = screen_sharp_memory_paint,
-    .bind = screen_sharp_memory_bind,
+    {
+        // .io_ops
+        "screen:sharp-memory",                // .name
+        IO_SCREEN,                            // .type
+        sizeof(screen_sharp_memory_priv_t),   // .data_size
+        screen_sharp_memory_config,           // .config
+        screen_sharp_memory_setup,            // .setup
+        screen_sharp_memory_destroy,          // .destroy
+    },
+    screen_sharp_memory_paint, // .paint
+    screen_sharp_memory_bind,  // .bind
 };
 
 static int config_string(lua_State *l, int table, const char *name, char **value, const char *fallback) {
