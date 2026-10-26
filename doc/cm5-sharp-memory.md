@@ -132,14 +132,6 @@ takes about 50 ms at that clock rate.
 400x240 instead of preserving the original 2:1 norns aspect ratio as a centered
 400x200 image.
 
-Text keeps Cairo antialiasing and the normal Bayer-dithered interior, while
-`text_outline=true` reinforces each glyph boundary with a solid one-physical-
-pixel inner outline. The outline automatically follows the text/background
-polarity, including with `invert=true`. `text_outline_threshold` selects which
-antialiased mask pixels count as part of a glyph; the default is `96`, and the
-valid range is 1 through 255. Higher values produce a slightly tighter outline.
-Set `text_outline=false` to compare against unmodified dithering.
-
 Software VCOM is maintained by matron even when the image does not change.
 Do not leave the display powered for an extended period while matron is stopped.
 

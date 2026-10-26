@@ -69,8 +69,6 @@ static cairo_surface_t *surface;
 static cairo_surface_t *image;
 static cairo_t *cr;
 static cairo_t *cr_primary;
-static cairo_surface_t *text_mask_surface;
-static cairo_t *text_mask_cr;
 static bool surface_may_have_color = false;
 
 static cairo_font_face_t *ct[NUM_FONTS];
@@ -79,8 +77,6 @@ static FT_Error status;
 static FT_Face face[NUM_FONTS];
 
 static void init_font_faces(void);
-static void text_mask_clear(void);
-static void text_mask_show_text(const char *s);
 
 //---------------------------------------
 //--- extern function definitions
@@ -88,9 +84,6 @@ static void text_mask_show_text(const char *s);
 void screen_init(void) {
     surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 128, 64);
     cr = cr_primary = cairo_create(surface);
-    text_mask_surface = cairo_image_surface_create(CAIRO_FORMAT_A8, 128, 64);
-    text_mask_cr = cairo_create(text_mask_surface);
-    text_mask_clear();
 
     cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
     cairo_paint(cr);
@@ -115,49 +108,10 @@ void screen_init(void) {
 //-----------------
 //-- screen commands
 
-static void text_mask_clear(void) {
-    if (text_mask_cr == NULL)
-        return;
-    cairo_save(text_mask_cr);
-    cairo_set_operator(text_mask_cr, CAIRO_OPERATOR_CLEAR);
-    cairo_paint(text_mask_cr);
-    cairo_restore(text_mask_cr);
-}
-
-static void text_mask_show_text(const char *s) {
-    if (cr != cr_primary || text_mask_cr == NULL)
-        return;
-
-    cairo_matrix_t matrix;
-    cairo_matrix_t font_matrix;
-    cairo_font_options_t *font_options = cairo_font_options_create();
-
-    cairo_get_matrix(cr, &matrix);
-    cairo_set_matrix(text_mask_cr, &matrix);
-    cairo_set_font_face(text_mask_cr, cairo_get_font_face(cr));
-    cairo_get_font_matrix(cr, &font_matrix);
-    cairo_set_font_matrix(text_mask_cr, &font_matrix);
-    cairo_get_font_options(cr, font_options);
-    cairo_set_font_options(text_mask_cr, font_options);
-    cairo_font_options_destroy(font_options);
-
-    cairo_new_path(text_mask_cr);
-    if (cairo_has_current_point(cr)) {
-        double x;
-        double y;
-        cairo_get_current_point(cr, &x, &y);
-        cairo_move_to(text_mask_cr, x, y);
-    }
-    cairo_set_operator(text_mask_cr, CAIRO_OPERATOR_OVER);
-    cairo_set_source_rgba(text_mask_cr, 1.0, 1.0, 1.0, 1.0);
-    cairo_show_text(text_mask_cr, s);
-}
-
 void screen_text_right(const char *s) {
     cairo_text_extents_t extents;
     cairo_text_extents(cr, s, &extents);
     cairo_rel_move_to(cr, -extents.width, 0);
-    text_mask_show_text(s);
     cairo_show_text(cr, s);
 }
 
@@ -165,7 +119,6 @@ void screen_text_center(const char *s) {
     cairo_text_extents_t extents;
     cairo_text_extents(cr, s, &extents);
     cairo_rel_move_to(cr, -extents.width * 0.5, 0);
-    text_mask_show_text(s);
     cairo_show_text(cr, s);
 }
 
@@ -179,7 +132,6 @@ void screen_text_trim(char *s, double w) {
             return;
         }
     } while (extents.width > w);
-    text_mask_show_text(s);
     cairo_show_text(cr, s);
 }
 
@@ -328,14 +280,6 @@ void init_font_faces(void) {
 }
 
 void screen_deinit(void) {
-    if (text_mask_cr != NULL) {
-        cairo_destroy(text_mask_cr);
-        text_mask_cr = NULL;
-    }
-    if (text_mask_surface != NULL) {
-        cairo_surface_destroy(text_mask_surface);
-        text_mask_surface = NULL;
-    }
     if (cr != NULL) {
         cairo_destroy(cr);
         cr = NULL;
@@ -354,10 +298,6 @@ bool screen_has_io_backend(void) {
             return true;
     }
     return false;
-}
-
-cairo_surface_t *screen_get_text_mask(void) {
-    return text_mask_surface;
 }
 
 void screen_update(void) {
@@ -536,7 +476,6 @@ void screen_fill(void) {
 }
 
 void screen_text(const char *s) {
-    text_mask_show_text(s);
     cairo_show_text(cr, s);
 }
 
@@ -544,8 +483,6 @@ void screen_clear(void) {
     cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
     cairo_paint(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-    if (cr == cr_primary)
-        text_mask_clear();
     surface_may_have_color = false;
 }
 

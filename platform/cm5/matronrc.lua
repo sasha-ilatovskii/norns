@@ -1,6 +1,6 @@
 -- norns runtime I/O for a CM5 with an Adafruit 2.7-inch 400x240 Sharp Memory
 -- Display data connected to SPI0, with its active-high CS on GPIO25. Copy this
--- file to ~/matronrc.lua.
+-- file to /home/we/matronrc.lua.
 
 _boot.add_io('screen:sharp-memory', {
   dev = '/dev/spidev0.0',
@@ -26,12 +26,6 @@ _boot.add_io('screen:sharp-memory', {
   -- false preserves the norns 2:1 aspect ratio (400x200 on a 400x240 panel).
   -- Set true to use the complete panel at the cost of vertical distortion.
   stretch = false,
-
-  -- Keep Cairo font smoothing, but reinforce glyph boundaries with a solid
-  -- one-panel-pixel inner outline after dithering. The threshold controls
-  -- which antialiased text-mask pixels belong to the outlined glyph.
-  text_outline = true,
-  text_outline_threshold = 96,
 })
 
 -- Add the keys and encoders used by your carrier board here. The paths below
