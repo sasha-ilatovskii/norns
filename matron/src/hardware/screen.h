@@ -9,6 +9,7 @@ extern "C" {
 
 extern void screen_init(void);
 extern void screen_deinit(void);
+extern bool screen_has_io_backend(void);
 
 extern void screen_update(void);
 extern void screen_save(void);

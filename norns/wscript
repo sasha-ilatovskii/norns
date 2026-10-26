@@ -17,6 +17,8 @@ def build(bld):
         '../matron/src/hardware/io.cc',
         '../matron/src/hardware/platform.cc',
         '../matron/src/hardware/screen.cc',
+        '../matron/src/hardware/screen/sharp_memory.cc',
+        '../matron/src/hardware/screen/sharp_memory_dither.cc',
         '../matron/src/hardware/stat.cc',
 	    '../matron/src/hardware/screen/ssd1322.cc',
         '../matron/src/hardware/input/gpio.cc',
@@ -143,7 +145,10 @@ def build(bld):
     norns_includes = ['.'] + matron_includes + crone_includes
     norns_use = matron_use + crone_use
     norns_libs = norns_libs + matron_libs + crone_libs
-    norns_cxxflags = ['-O3', '-Wall', '-mfpu=neon']
+    is_aarch64 = bld.env.DEST_CPU in ('aarch64', 'arm64')
+    norns_cxxflags = ['-O3', '-Wall']
+    if not is_aarch64:
+        norns_cxxflags += ['-mfpu=neon']
     norns_ldflags = ['-Wl,-export-dynamic']
 
     if bld.env.NORNS_PROFILE:
@@ -154,15 +159,19 @@ def build(bld):
         norns_cxxflags += ['-g']
 
     if bld.env.NORNS_RELEASE:
-        norns_cxxflags += [
-            '-mcpu=cortex-a53',
-            '-mtune=cortex-a53',
-            '-mfpu=neon-fp-armv8',
-            '-mfloat-abi=hard',
-            '-funconstrained-commons',
-            '-ffast-math',
-            '-fgcse-sm',
-        ]
+        if bld.env.NORNS_CM5:
+            norns_cxxflags += ['-mcpu=cortex-a76', '-mtune=cortex-a76']
+        else:
+            norns_cxxflags += ['-mcpu=cortex-a53', '-mtune=cortex-a53']
+
+        if not is_aarch64:
+            norns_cxxflags += [
+                '-mfpu=neon-fp-armv8',
+                '-mfloat-abi=hard',
+                '-funconstrained-commons',
+            ]
+
+        norns_cxxflags += ['-ffast-math', '-fgcse-sm']
 
     bld.program(features='c cprogram cxx cxxprogram',
         target='norns',

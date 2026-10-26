@@ -14,6 +14,7 @@ typedef enum {
     PLATFORM_PI4,
     PLATFORM_CM4,
     PLATFORM_CM4S,
+    PLATFORM_CM5,
 } platform_t;
 
 extern void init_platform(void);

@@ -269,7 +269,6 @@ void init_font_faces(void) {
     cairo_set_font_size(cr, 8.0);
 
     fprintf(stderr, "font setup OK.\n");
-#ifdef NORNS_DESKTOP
     matron_io_t *io;
     TAILQ_FOREACH(io, &io_queue, entries) {
         if (io->ops->type != IO_SCREEN)
@@ -278,17 +277,31 @@ void init_font_faces(void) {
         screen_ops_t *fb_ops = (screen_ops_t *)io->ops;
         fb_ops->bind(fb, surface);
     }
-#endif
 }
 
 void screen_deinit(void) {
-    cairo_destroy(cr);
-    cairo_surface_destroy(surface);
+    if (cr != NULL) {
+        cairo_destroy(cr);
+        cr = NULL;
+        cr_primary = NULL;
+    }
+    if (surface != NULL) {
+        cairo_surface_destroy(surface);
+        surface = NULL;
+    }
+}
+
+bool screen_has_io_backend(void) {
+    matron_io_t *io;
+    TAILQ_FOREACH(io, &io_queue, entries) {
+        if (io->ops->type == IO_SCREEN)
+            return true;
+    }
+    return false;
 }
 
 void screen_update(void) {
-
-#ifdef NORNS_DESKTOP
+    bool painted = false;
     matron_io_t *io;
     TAILQ_FOREACH(io, &io_queue, entries) {
         if (io->ops->type != IO_SCREEN)
@@ -296,9 +309,10 @@ void screen_update(void) {
         matron_fb_t *fb = (matron_fb_t *)io;
         screen_ops_t *fb_ops = (screen_ops_t *)io->ops;
         fb_ops->paint(fb);
+        painted = true;
     }
-    return;
-#endif
+    if (painted)
+        return;
 
     cairo_surface_flush(surface);
     ssd1322_update(surface, surface_may_have_color);
@@ -336,6 +350,9 @@ void screen_aa(int s) {
 }
 
 void screen_brightness(int v) {
+    if (screen_has_io_backend())
+        return;
+
     if (v < 0) {
         v = 0;
     }
@@ -352,6 +369,9 @@ void screen_brightness(int v) {
 }
 
 void screen_contrast(int c) {
+    if (screen_has_io_backend())
+        return;
+
     if (c < 0) {
         c = 0;
     }
@@ -362,6 +382,9 @@ void screen_contrast(int c) {
 }
 
 void screen_gamma(double g) {
+    if (screen_has_io_backend())
+        return;
+
     if (g < 0.0) {
         g = 0;
     }
@@ -370,6 +393,8 @@ void screen_gamma(double g) {
 }
 
 void screen_invert(int inverted) {
+    if (screen_has_io_backend())
+        return;
     ssd1322_set_display_mode((inverted != 0) ? SSD1322_DISPLAY_MODE_INVERT : SSD1322_DISPLAY_MODE_NORMAL);
 }
 

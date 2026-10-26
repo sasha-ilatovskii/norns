@@ -15,7 +15,9 @@ void init_platform() {
         fgets(modelString, 100, fptr);
         fclose(fptr);
 
-        if (strstr(modelString, "Compute Module 3")) {
+        if (strstr(modelString, "Compute Module 5")) {
+            p = PLATFORM_CM5;
+        } else if (strstr(modelString, "Compute Module 3")) {
             p = PLATFORM_CM3;
         } else if (strstr(modelString, "Compute Module 4S")) {
             p = PLATFORM_CM4S;
@@ -43,6 +45,8 @@ const char *platform_name() {
         return "cm4";
     case PLATFORM_CM4S:
         return "cm4s";
+    case PLATFORM_CM5:
+        return "cm5";
     case PLATFORM_PI3:
         return "pi3";
     case PLATFORM_PI4:

@@ -1,0 +1,31 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2712";
+
+    fragment@0 {
+        target = <&spi0>;
+        __overlay__ {
+            #address-cells = <1>;
+            #size-cells = <0>;
+            status = "okay";
+
+            sharp_memory: display@0 {
+                compatible = "sharp,ls027b7dh01";
+                reg = <0>;
+                spi-cs-high;
+                spi-max-frequency = <2000000>;
+                sharp,vcom-mode = "software";
+                status = "okay";
+            };
+        };
+    };
+
+    fragment@1 {
+        target = <&spidev0>;
+        __overlay__ {
+            status = "disabled";
+        };
+    };
+};

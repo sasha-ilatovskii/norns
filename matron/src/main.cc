@@ -47,6 +47,7 @@ void matron_cleanup(void) {
     w_deinit();
 
     config_deinit();
+    screen_deinit();
     i2c_deinit();
     battery_deinit();
     stat_deinit();
@@ -75,14 +76,16 @@ int matron_main(int argc, char **argv) {
     battery_init();
     stat_init();
     osc_init();
-    ssd1322_init();
+    if (!screen_has_io_backend())
+        ssd1322_init();
     if (jack_client_init()) {
         screen_clear();
         screen_level(15);
         screen_move(10, 40);
         screen_text("audio system fail.");
         screen_update();
-        ssd1322_refresh();
+        if (!screen_has_io_backend())
+            ssd1322_refresh();
         return -1;
     }
     clock_init();

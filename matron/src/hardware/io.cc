@@ -8,6 +8,7 @@
 #include "hardware/screen/screens.h"
 
 io_ops_t *io_types[] = {
+    (io_ops_t *)&screen_sharp_memory_ops,
     (io_ops_t *)&enc_gpio_ops,
     (io_ops_t *)&key_gpio_ops,
 

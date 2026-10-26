@@ -56,6 +56,9 @@ git submodule update --init --recursive
 ./waf
 ```
 
+For a Raspberry Pi Compute Module 5 with a Sharp Memory LCD and Zoom AMS-22,
+see [doc/cm5-sharp-memory.md](doc/cm5-sharp-memory.md).
+
 this should build several executables under `norns/build/<name>/`:
 
 - `matron`: the main norns system application: runs scripts, interfaces with controllers and screens

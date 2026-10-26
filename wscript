@@ -23,6 +23,8 @@ def options(opt):
     opt.add_option('--desktop', action='store_true', default=False)
     opt.add_option('--release', action='store_true', default=False,
         help='enable specific arm target architecture optimizations')
+    opt.add_option('--cm5', action='store_true', default=False,
+        help='optimize a release build for Raspberry Pi Compute Module 5')
     opt.add_option('--enable-debug', action='store_true', default=False,
         help='enable debug code and emit symbols')
     opt.add_option('--enable-profile', action='store_true', default=False,
@@ -102,6 +104,12 @@ def configure(conf):
     if conf.options.release:
         conf.define('NORNS_RELEASE', True)
     conf.env.NORNS_RELEASE = conf.options.release
+
+    if conf.options.cm5 and not conf.options.release:
+        conf.fatal('--cm5 requires --release')
+    if conf.options.cm5 and conf.env.DEST_CPU not in ('aarch64', 'arm64'):
+        conf.fatal('--cm5 requires a 64-bit AArch64 compiler and operating system')
+    conf.env.NORNS_CM5 = conf.options.cm5
 
     if conf.options.enable_debug:
         conf.define('NORNS_DEBUG', True)
