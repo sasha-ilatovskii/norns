@@ -137,38 +137,8 @@ mkdir -p ~/dust/code ~/dust/audio/tape ~/dust/data
 ```
 
 When launching manually, do not use `sudo`: it changes the runtime account and
-may change `HOME`. For a systemd launch, verify both the configured account and
-the process environment:
-
-```sh
-systemctl show norns-main -p User -p Group -p Environment
-pid=$(pgrep -n norns)
-tr '\0' '\n' < "/proc/$pid/environ" | grep -E '^(HOME|USER)='
-```
-
-On this CM5 the expected values are `User=me`, `HOME=/home/me`, and `USER=me`.
-Stock norns service files use the original `we` account and must not be used
-unchanged on an installation owned by `me`.
-
-If `norns-main.service` still contains `we`, create an override with
-`sudo systemctl edit norns-main`:
-
-```ini
-[Service]
-User=me
-Group=me
-Environment=HOME=/home/me
-Environment=USER=me
-ExecStart=
-ExecStart=/home/me/norns/build/ws-wrapper/ws-wrapper ws://*:5555 /home/me/norns/build/norns/norns
-```
-
-Then apply it:
-
-```sh
-sudo systemctl daemon-reload
-sudo systemctl restart norns-main
-```
+may change `HOME`. The CM5 systemd units described below explicitly run as
+`me` with `HOME=/home/me`.
 
 The default configuration uses `/dev/spidev0.0`, line 25 of the `pinctrl-rp1`
 GPIO chip for CS, a 2 MHz SPI clock, and 15 frames per second. A complete frame
@@ -231,26 +201,76 @@ the identifier reported by ALSA differs:
 
 ```sh
 sudo install -m 0644 ~/norns/platform/cm5/norns-cm5.env /etc/default/norns-cm5
-sudo mkdir -p /etc/systemd/system/norns-jack.service.d
-sudo install -m 0644 \
-  ~/norns/platform/cm5/systemd/norns-jack.service.d/10-zoom-ams22.conf \
-  /etc/systemd/system/norns-jack.service.d/
 sudo usermod -aG audio "$USER"
-sudo systemctl daemon-reload
-sudo systemctl restart norns-jack
-```
-
-Verify JACK before starting all of norns:
-
-```sh
-systemctl status norns-jack --no-pager
-jack_lsp
 ```
 
 The profile uses 48 kHz, 128 frames, and three periods. If USB xruns occur,
-increase `-p 128` to `-p 256`. Keep the AMS-22 LOOPBACK switch off to avoid a
-feedback path. Use DIRECT MONITOR only when an unprocessed dry signal is
-desired; otherwise norns and the interface will monitor the input twice.
+increase `-p 128` to `-p 256` in `platform/cm5/systemd/norns-jack.service` and
+reinstall the unit. Keep the AMS-22 LOOPBACK switch off to avoid a feedback
+path. Use DIRECT MONITOR only when an unprocessed dry signal is desired;
+otherwise norns and the interface will monitor the input twice.
+
+## Running under systemd
+
+Stop any manually started `jackd`, `sclang`, or norns processes first so they
+do not retain the audio device or websocket ports. Confirm that the required
+programs and locally built binaries exist:
+
+```sh
+command -v jackd jack_wait sclang
+test -x ~/norns/build/ws-wrapper/ws-wrapper && echo "ws-wrapper: OK"
+test -x ~/norns/build/norns/norns && echo "norns: OK"
+```
+
+Then install the CM5 services:
+
+```sh
+sudo install -m 0644 \
+  ~/norns/platform/cm5/systemd/norns-jack.service \
+  ~/norns/platform/cm5/systemd/norns-sclang.service \
+  ~/norns/platform/cm5/systemd/norns-main.service \
+  ~/norns/platform/cm5/systemd/norns.target \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now norns.target
+```
+
+These units are intentionally configured for the `me` account and the checkout
+at `/home/me/norns`. They set `HOME=/home/me`, expose the norns and sclang REPLs
+on ports 5555 and 5556, and start components in this order:
+
+```text
+JACK -> SuperCollider -> norns
+```
+
+Verify all three services:
+
+```sh
+systemctl status norns-jack norns-sclang norns-main --no-pager
+jack_lsp
+systemctl show norns-main -p User -p Group -p Environment
+pid=$(pgrep -n norns)
+tr '\0' '\n' < "/proc/$pid/environ" | grep -E '^(HOME|USER)='
+```
+
+The expected environment is `User=me`, `HOME=/home/me`, and `USER=me`. Follow
+the live norns log with:
+
+```sh
+journalctl -fu norns-main
+```
+
+After rebuilding norns, restart only the main process:
+
+```sh
+sudo systemctl restart norns-main
+```
+
+To restart the complete audio stack in dependency order:
+
+```sh
+sudo systemctl restart norns.target
+```
 
 ## Controls
 

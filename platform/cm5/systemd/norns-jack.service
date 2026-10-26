@@ -1,0 +1,25 @@
+[Unit]
+Description=norns JACK server for CM5 and Zoom AMS-22
+After=sound.target
+Wants=sound.target
+PartOf=norns.target
+
+[Service]
+Type=simple
+User=me
+Group=me
+SupplementaryGroups=audio
+Environment=HOME=/home/me
+Environment=USER=me
+Environment=JACK_NO_AUDIO_RESERVATION=1
+EnvironmentFile=-/etc/default/norns-cm5
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+ExecStart=/usr/bin/jackd -R -P 95 -d alsa -d ${NORNS_AUDIO_DEVICE} -r 48000 -n 3 -p 128 -S -s
+ExecStartPost=/usr/bin/jack_wait -w -t 10
+Restart=on-failure
+RestartSec=1
+TimeoutStopSec=2
+
+[Install]
+WantedBy=norns.target

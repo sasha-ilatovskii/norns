@@ -1,0 +1,8 @@
+[Unit]
+Description=norns CM5 runtime
+Requires=norns-jack.service norns-sclang.service norns-main.service
+After=norns-jack.service norns-sclang.service norns-main.service
+AllowIsolate=yes
+
+[Install]
+WantedBy=multi-user.target
