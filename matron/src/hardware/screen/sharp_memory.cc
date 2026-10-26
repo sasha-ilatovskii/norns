@@ -1,6 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/fb.h>
+#include <linux/spi/spidev.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -17,18 +17,26 @@
 #include "hardware/io.h"
 #include "hardware/screen/screens.h"
 #include "hardware/screen/sharp_memory_dither.h"
+#include "hardware/screen/sharp_memory_protocol.h"
+
+#define SHARP_MEMORY_WIDTH 400
+#define SHARP_MEMORY_HEIGHT 240
+#define SHARP_MEMORY_ROWS_PER_TRANSFER 60
+#define SHARP_MEMORY_DEFAULT_SPEED_HZ 2000000
 
 typedef struct _screen_sharp_memory_priv {
     char *dev;
-    int fb_fd;
+    int spi_fd;
     uint8_t *frame;
     size_t frame_size;
-    struct fb_var_screeninfo vinfo;
-    struct fb_fix_screeninfo finfo;
+    uint8_t *packet;
+    size_t packet_size;
     cairo_surface_t *source;
     int fps;
+    uint32_t speed_hz;
     bool invert;
     bool stretch;
+    bool vcom;
     volatile bool refresh_running;
     pthread_t refresh_thread;
     pthread_mutex_t paint_lock;
@@ -96,22 +104,80 @@ static bool config_boolean(lua_State *l, int table, const char *name, bool fallb
 static int screen_sharp_memory_config(matron_io_t *io, lua_State *l) {
     screen_sharp_memory_priv_t *priv = (screen_sharp_memory_priv_t *)io->data;
     memset(priv, 0, sizeof(*priv));
-    priv->fb_fd = -1;
+    priv->spi_fd = -1;
 
-    if (config_string(l, 2, "dev", &priv->dev, "/dev/fb0") != 0)
+    if (config_string(l, 2, "dev", &priv->dev, "/dev/spidev0.0") != 0)
         return -1;
 
     priv->fps = config_integer(l, 2, "fps", 15);
-    if (priv->fps < 1 || priv->fps > 60) {
-        fprintf(stderr, "ERROR (screen:sharp-memory) 'fps' must be between 1 and 60\n");
+    if (priv->fps < 1 || priv->fps > 20) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) 'fps' must be between 1 and 20\n");
         free(priv->dev);
         priv->dev = NULL;
         return -1;
     }
 
+    const int speed_hz = config_integer(l, 2, "speed_hz", SHARP_MEMORY_DEFAULT_SPEED_HZ);
+    if (speed_hz < 100000 || speed_hz > SHARP_MEMORY_DEFAULT_SPEED_HZ) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) 'speed_hz' must be between 100000 and 2000000\n");
+        free(priv->dev);
+        priv->dev = NULL;
+        return -1;
+    }
+    priv->speed_hz = (uint32_t)speed_hz;
+
     priv->invert = config_boolean(l, 2, "invert", false);
     priv->stretch = config_boolean(l, 2, "stretch", false);
     return 0;
+}
+
+static bool spi_write_transaction(screen_sharp_memory_priv_t *priv, const uint8_t *data, size_t size) {
+    ssize_t written;
+    do {
+        written = write(priv->spi_fd, data, size);
+    } while (written < 0 && errno == EINTR);
+
+    if (written < 0)
+        return false;
+    if ((size_t)written != size) {
+        errno = EIO;
+        return false;
+    }
+    return true;
+}
+
+static bool send_command(screen_sharp_memory_priv_t *priv, uint8_t command) {
+    uint8_t packet[2];
+    const size_t packet_size =
+        sharp_memory_encode_command(packet, sizeof(packet), command, priv->vcom);
+    return packet_size != 0 && spi_write_transaction(priv, packet, packet_size);
+}
+
+static bool send_frame(screen_sharp_memory_priv_t *priv) {
+    for (uint32_t first_row = 0; first_row < SHARP_MEMORY_HEIGHT;
+         first_row += SHARP_MEMORY_ROWS_PER_TRANSFER) {
+        uint32_t row_count = SHARP_MEMORY_HEIGHT - first_row;
+        if (row_count > SHARP_MEMORY_ROWS_PER_TRANSFER)
+            row_count = SHARP_MEMORY_ROWS_PER_TRANSFER;
+
+        const size_t encoded = sharp_memory_encode_rows(priv->packet,
+                                                        priv->packet_size,
+                                                        priv->frame,
+                                                        SHARP_MEMORY_WIDTH,
+                                                        first_row,
+                                                        row_count,
+                                                        priv->vcom);
+        if (encoded == 0 || !spi_write_transaction(priv, priv->packet, encoded))
+            return false;
+    }
+    return true;
+}
+
+static void report_write_error(screen_sharp_memory_priv_t *priv) {
+    if (!priv->write_error_reported) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) writing %s: %s\n", priv->dev, strerror(errno));
+        priv->write_error_reported = true;
+    }
 }
 
 static void *screen_sharp_memory_refresh(void *data) {
@@ -120,18 +186,53 @@ static void *screen_sharp_memory_refresh(void *data) {
         .tv_sec = 0,
         .tv_nsec = 1000000000L / priv->fps,
     };
+    int ticks_until_vcom = priv->fps;
 
     while (priv->refresh_running) {
         event_post(event_data_new(EVENT_SCREEN_REFRESH));
         clock_nanosleep(CLOCK_MONOTONIC, 0, &tick, NULL);
+
+        if (--ticks_until_vcom <= 0 && priv->refresh_running) {
+            pthread_mutex_lock(&priv->paint_lock);
+            priv->vcom = !priv->vcom;
+            if (!send_command(priv, 0))
+                report_write_error(priv);
+            else
+                priv->write_error_reported = false;
+            pthread_mutex_unlock(&priv->paint_lock);
+            ticks_until_vcom = priv->fps;
+        }
     }
     return NULL;
 }
 
-static bool framebuffer_format_supported(const struct fb_var_screeninfo *vinfo) {
-    if (vinfo->bits_per_pixel != 16 && vinfo->bits_per_pixel != 24 && vinfo->bits_per_pixel != 32)
-        return false;
-    return vinfo->red.length > 0 && vinfo->green.length > 0 && vinfo->blue.length > 0;
+static void close_spi(screen_sharp_memory_priv_t *priv) {
+    if (priv->spi_fd >= 0) {
+        close(priv->spi_fd);
+        priv->spi_fd = -1;
+    }
+}
+
+static int configure_spi(screen_sharp_memory_priv_t *priv) {
+    uint8_t mode = SPI_MODE_0 | SPI_CS_HIGH;
+    uint8_t bits_per_word = 8;
+
+    if (ioctl(priv->spi_fd, SPI_IOC_WR_MODE, &mode) < 0 ||
+        ioctl(priv->spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits_per_word) < 0 ||
+        ioctl(priv->spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &priv->speed_hz) < 0) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) cannot configure %s: %s\n",
+                priv->dev, strerror(errno));
+        return -1;
+    }
+
+    uint8_t actual_mode = 0;
+    if (ioctl(priv->spi_fd, SPI_IOC_RD_MODE, &actual_mode) < 0 ||
+        (actual_mode & SPI_CS_HIGH) == 0) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) %s does not support active-high chip select\n",
+                priv->dev);
+        return -1;
+    }
+    return 0;
 }
 
 static int screen_sharp_memory_setup(matron_io_t *io) {
@@ -140,55 +241,51 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
     fb->surface = NULL;
     fb->cairo = NULL;
 
-    priv->fb_fd = open(priv->dev, O_RDWR | O_CLOEXEC);
-    if (priv->fb_fd < 0) {
+    priv->spi_fd = open(priv->dev, O_RDWR | O_CLOEXEC);
+    if (priv->spi_fd < 0) {
         fprintf(stderr, "ERROR (screen:sharp-memory) cannot open %s: %s\n", priv->dev, strerror(errno));
         return -1;
     }
-
-    if (ioctl(priv->fb_fd, FBIOGET_VSCREENINFO, &priv->vinfo) < 0 ||
-        ioctl(priv->fb_fd, FBIOGET_FSCREENINFO, &priv->finfo) < 0) {
-        fprintf(stderr, "ERROR (screen:sharp-memory) cannot read framebuffer information for %s: %s\n",
-                priv->dev, strerror(errno));
-        close(priv->fb_fd);
-        priv->fb_fd = -1;
+    if (configure_spi(priv) != 0) {
+        close_spi(priv);
         return -1;
     }
 
-    if (!framebuffer_format_supported(&priv->vinfo)) {
-        fprintf(stderr,
-                "ERROR (screen:sharp-memory) %s uses unsupported %u-bit framebuffer format\n",
-                priv->dev, priv->vinfo.bits_per_pixel);
-        close(priv->fb_fd);
-        priv->fb_fd = -1;
+    priv->frame_size = (SHARP_MEMORY_WIDTH * SHARP_MEMORY_HEIGHT) / 8;
+    priv->packet_size = sharp_memory_encoded_rows_size(
+        SHARP_MEMORY_WIDTH, SHARP_MEMORY_ROWS_PER_TRANSFER);
+    priv->frame = (uint8_t *)malloc(priv->frame_size);
+    priv->packet = (uint8_t *)malloc(priv->packet_size);
+    if (priv->frame == NULL || priv->packet == NULL) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) cannot allocate display buffers\n");
+        free(priv->packet);
+        free(priv->frame);
+        priv->packet = NULL;
+        priv->frame = NULL;
+        close_spi(priv);
         return -1;
     }
-
-    const uint64_t required_size =
-        (uint64_t)priv->finfo.line_length * (priv->vinfo.yoffset + priv->vinfo.yres);
-    if (required_size == 0 || required_size > SIZE_MAX ||
-        (priv->finfo.smem_len != 0 && required_size > priv->finfo.smem_len)) {
-        fprintf(stderr, "ERROR (screen:sharp-memory) invalid framebuffer size for %s\n", priv->dev);
-        close(priv->fb_fd);
-        priv->fb_fd = -1;
-        return -1;
-    }
-
-    priv->frame_size = (size_t)required_size;
-    priv->frame = (uint8_t *)calloc(priv->frame_size, 1);
-    if (priv->frame == NULL) {
-        fprintf(stderr, "ERROR (screen:sharp-memory) cannot allocate framebuffer copy\n");
-        close(priv->fb_fd);
-        priv->fb_fd = -1;
-        return -1;
-    }
+    memset(priv->frame, 0xff, priv->frame_size);
 
     if (pthread_mutex_init(&priv->paint_lock, NULL) != 0) {
         fprintf(stderr, "ERROR (screen:sharp-memory) cannot initialize paint lock\n");
+        free(priv->packet);
         free(priv->frame);
+        priv->packet = NULL;
         priv->frame = NULL;
-        close(priv->fb_fd);
-        priv->fb_fd = -1;
+        close_spi(priv);
+        return -1;
+    }
+
+    if (!send_command(priv, SHARP_MEMORY_CLEAR_COMMAND)) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) cannot initialize %s: %s\n",
+                priv->dev, strerror(errno));
+        pthread_mutex_destroy(&priv->paint_lock);
+        free(priv->packet);
+        free(priv->frame);
+        priv->packet = NULL;
+        priv->frame = NULL;
+        close_spi(priv);
         return -1;
     }
 
@@ -197,16 +294,17 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
         fprintf(stderr, "ERROR (screen:sharp-memory) cannot start refresh thread\n");
         priv->refresh_running = false;
         pthread_mutex_destroy(&priv->paint_lock);
+        free(priv->packet);
         free(priv->frame);
+        priv->packet = NULL;
         priv->frame = NULL;
-        close(priv->fb_fd);
-        priv->fb_fd = -1;
+        close_spi(priv);
         return -1;
     }
 
     fprintf(stderr,
-            "screen:sharp-memory: %s %ux%u, %u bpp, %d fps, dither=bayer8, invert=%s, stretch=%s\n",
-            priv->dev, priv->vinfo.xres, priv->vinfo.yres, priv->vinfo.bits_per_pixel, priv->fps,
+            "screen:sharp-memory: %s %dx%d, %u Hz SPI, %d fps, dither=bayer8, invert=%s, stretch=%s\n",
+            priv->dev, SHARP_MEMORY_WIDTH, SHARP_MEMORY_HEIGHT, priv->speed_hz, priv->fps,
             priv->invert ? "yes" : "no", priv->stretch ? "yes" : "no");
     return 0;
 }
@@ -223,61 +321,32 @@ static void screen_sharp_memory_destroy(matron_io_t *io) {
         priv->source = NULL;
     }
     if (priv->frame != NULL) {
+        pthread_mutex_lock(&priv->paint_lock);
+        send_command(priv, SHARP_MEMORY_CLEAR_COMMAND);
+        pthread_mutex_unlock(&priv->paint_lock);
         pthread_mutex_destroy(&priv->paint_lock);
-        free(priv->frame);
-        priv->frame = NULL;
     }
-    if (priv->fb_fd >= 0) {
-        close(priv->fb_fd);
-        priv->fb_fd = -1;
-    }
+    free(priv->packet);
+    free(priv->frame);
+    priv->packet = NULL;
+    priv->frame = NULL;
+    close_spi(priv);
     free(priv->dev);
     priv->dev = NULL;
 }
 
-static uint64_t channel_mask(struct fb_bitfield field) {
-    if (field.length == 0)
-        return 0;
-    if (field.length >= 64)
-        return UINT64_MAX;
-    return ((UINT64_C(1) << field.length) - 1) << field.offset;
-}
-
-static void framebuffer_set_pixel(screen_sharp_memory_priv_t *priv, uint32_t x, uint32_t y, bool white) {
-    const uint32_t bytes_per_pixel = (priv->vinfo.bits_per_pixel + 7) / 8;
-    const size_t offset = (size_t)(y + priv->vinfo.yoffset) * priv->finfo.line_length +
-                          (size_t)(x + priv->vinfo.xoffset) * bytes_per_pixel;
-    if (offset + bytes_per_pixel > priv->frame_size)
-        return;
-
-    uint64_t pixel = 0;
-    if (white) {
-        pixel = channel_mask(priv->vinfo.red) |
-                channel_mask(priv->vinfo.green) |
-                channel_mask(priv->vinfo.blue) |
-                channel_mask(priv->vinfo.transp);
-    }
-    memcpy(priv->frame + offset, &pixel, bytes_per_pixel);
-}
-
-static bool framebuffer_write(screen_sharp_memory_priv_t *priv) {
-    size_t remaining = priv->frame_size;
-    size_t offset = 0;
-    while (remaining > 0) {
-        const ssize_t written = pwrite(priv->fb_fd, priv->frame + offset, remaining, (off_t)offset);
-        if (written < 0 && errno == EINTR)
-            continue;
-        if (written <= 0)
-            return false;
-        offset += (size_t)written;
-        remaining -= (size_t)written;
-    }
-    return true;
+static void set_pixel(screen_sharp_memory_priv_t *priv, uint32_t x, uint32_t y, bool white) {
+    const size_t offset = (size_t)y * (SHARP_MEMORY_WIDTH / 8) + x / 8;
+    const uint8_t mask = (uint8_t)(1U << (x & 7));
+    if (white)
+        priv->frame[offset] |= mask;
+    else
+        priv->frame[offset] &= (uint8_t)~mask;
 }
 
 static void screen_sharp_memory_paint(matron_fb_t *fb) {
     screen_sharp_memory_priv_t *priv = (screen_sharp_memory_priv_t *)fb->io.data;
-    if (priv->source == NULL || priv->frame == NULL || priv->fb_fd < 0)
+    if (priv->source == NULL || priv->frame == NULL || priv->spi_fd < 0)
         return;
 
     pthread_mutex_lock(&priv->paint_lock);
@@ -288,11 +357,11 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
     const int source_stride = cairo_image_surface_get_stride(priv->source);
     const uint8_t *source_data = cairo_image_surface_get_data(priv->source);
     const sharp_memory_viewport_t viewport = sharp_memory_fit_viewport(
-        source_width, source_height, priv->vinfo.xres, priv->vinfo.yres, priv->stretch);
+        source_width, source_height, SHARP_MEMORY_WIDTH, SHARP_MEMORY_HEIGHT, priv->stretch);
 
     if (source_data != NULL && source_width > 0 && source_height > 0) {
-        for (uint32_t y = 0; y < priv->vinfo.yres; ++y) {
-            for (uint32_t x = 0; x < priv->vinfo.xres; ++x) {
+        for (uint32_t y = 0; y < SHARP_MEMORY_HEIGHT; ++y) {
+            for (uint32_t x = 0; x < SHARP_MEMORY_WIDTH; ++x) {
                 bool white = priv->invert;
                 if (x >= viewport.x && x < viewport.x + viewport.width &&
                     y >= viewport.y && y < viewport.y + viewport.height) {
@@ -305,18 +374,14 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
                     white = sharp_memory_dither_is_white(
                         sharp_memory_luminance(argb), x - viewport.x, y - viewport.y, priv->invert);
                 }
-                framebuffer_set_pixel(priv, x, y, white);
+                set_pixel(priv, x, y, white);
             }
         }
 
-        if (!framebuffer_write(priv)) {
-            if (!priv->write_error_reported) {
-                fprintf(stderr, "ERROR (screen:sharp-memory) writing %s: %s\n", priv->dev, strerror(errno));
-                priv->write_error_reported = true;
-            }
-        } else {
+        if (!send_frame(priv))
+            report_write_error(priv);
+        else
             priv->write_error_reported = false;
-        }
     }
 
     pthread_mutex_unlock(&priv->paint_lock);

@@ -1,12 +1,14 @@
--- norns runtime I/O for a CM5 with a Sharp Memory LCD exposed by Linux as a
--- framebuffer. Copy this file to /home/we/matronrc.lua.
+-- norns runtime I/O for a CM5 with an Adafruit 2.7-inch 400x240 Sharp Memory
+-- Display connected to SPI0 CE0. Copy this file to /home/we/matronrc.lua.
 
 _boot.add_io('screen:sharp-memory', {
-  -- Check /sys/class/graphics/fb*/name after loading the sharp_memory driver.
-  dev = '/dev/fb0',
+  dev = '/dev/spidev0.0',
+
+  -- LS027B7DH01 maximum SPI clock.
+  speed_hz = 2000000,
 
   -- A 400x240 frame takes about 50 ms at the panel's 2 MHz SPI limit, so
-  -- 15 fps leaves some headroom for driver and scheduler overhead.
+  -- 15 fps leaves some headroom for SPI and scheduler overhead.
   fps = 15,
 
   -- false preserves the original white-on-black norns appearance. Set true

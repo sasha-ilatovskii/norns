@@ -2,86 +2,103 @@
 
 This port keeps the norns drawing API at 128x64 and adds a hardware output
 backend named `screen:sharp-memory`. The backend scales that surface to the
-panel framebuffer and uses deterministic 8x8 Bayer dithering to represent all
-16 norns levels on a monochrome panel.
+400x240 panel and uses deterministic 8x8 Bayer dithering to represent all 16
+norns levels on a monochrome display.
 
-The included device-tree example targets the common Sharp LS027B7DH01 or
-LS027B7DH01A (400x240). For another panel, use its exact model in the overlay;
-the upstream Linux driver supports several Sharp Memory LCD models.
+The backend speaks the Sharp Memory LCD protocol directly through Linux
+`spidev`. It does not require the `sharp_memory` DRM driver, a framebuffer, a
+custom kernel, or a device-tree overlay for the panel. It also maintains the
+software VCOM signal once per second while matron is running.
 
 ## Requirements
 
-- Raspberry Pi OS 64-bit on the CM5.
-- A Linux kernel with `CONFIG_TINYDRM_SHARP_MEMORY` (Linux 6.13 or newer has
-  the upstream [`sharp_memory` DRM driver](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/tiny/sharp-memory.c))
-  and fbdev emulation enabled.
-- Sharp Memory LCD connected through SPI0.
+- Raspberry Pi OS Lite 64-bit on the CM5.
+- Adafruit SHARP Memory Display Breakout, 2.7-inch 400x240, product 4694.
+- SPI0 enabled and exposed as `/dev/spidev0.0`.
 - Zoom AMS-22 connected directly to USB with a data-capable cable.
 
-Check the display driver before continuing:
+The stock Raspberry Pi kernel is sufficient. `modinfo sharp_memory` is not a
+valid check for this backend because that kernel driver is not used.
 
-```sh
-modinfo sharp_memory
-```
+## Adafruit display wiring
 
-If that command cannot find the module, install/build a kernel that enables the
-driver before configuring norns.
+The Adafruit breakout contains its own regulator, boost converter, logic-level
+translation, and the required defaults for software VCOM operation. Connect
+only these five pins:
 
-## LS027B7DH01 wiring and overlay
+| Adafruit breakout | CM5 40-pin header | 52Pi EP-0129 terminal | Notes |
+| --- | --- | --- | --- |
+| VIN | pin 1 / 3.3 V | `+3V3` | Do not connect the breakout's `3V3` output |
+| GND | pin 6 / GND | `GND` | Common ground |
+| CLK | pin 23 / GPIO11 | `SCLK` | SPI0 clock |
+| DI / MOSI | pin 19 / GPIO10 | `MOSI` | Display data input |
+| CS | pin 24 / GPIO8 | `CE0` | Active-high chip select |
 
-The sample uses software VCOM and hardware chip select:
+Leave `3V3`, `EXTMODE`, `EXTCOMIN`, and `DISP` on the Adafruit breakout
+unconnected. Shut down the CM5 and remove power before changing wiring.
 
-| Display | CM5 40-pin header | Notes |
-| --- | --- | --- |
-| SCLK | pin 23 / GPIO11 | SPI0 clock |
-| SI | pin 19 / GPIO10 | SPI0 MOSI |
-| SCS | pin 24 / GPIO8 | SPI0 CE0; the panel uses active-high CS |
-| DISP | 3.3 V | Display permanently enabled |
-| EXTMODE | GND | Enables software VCOM |
-| EXTCOMIN | GND | Unused in software VCOM mode |
-| VDD, VDDA | 3.3 V | Follow the panel/breakout data sheet |
-| VSS, VSSA | GND | Follow the panel/breakout data sheet |
+## Enable SPI
 
-VCOM inversion is mandatory. Leaving `EXTMODE` floating or using the wrong
-VCOM mode can permanently damage the panel. If a breakout board already
-generates EXTCOMIN, configure the overlay for external VCOM instead.
-
-Compile and install the overlay:
-
-```sh
-cd ~/norns
-dtc -@ -I dts -O dtb \
-  -o /tmp/norns-sharp-ls027b7dh01.dtbo \
-  platform/cm5/overlays/norns-sharp-ls027b7dh01-overlay.dts
-sudo install -m 0644 /tmp/norns-sharp-ls027b7dh01.dtbo \
-  /boot/firmware/overlays/
-```
-
-Add these lines to `/boot/firmware/config.txt`, then reboot:
+Make sure `/boot/firmware/config.txt` contains:
 
 ```ini
 dtparam=spi=on
+```
+
+Remove this line if it was added while testing the old framebuffer approach:
+
+```ini
 dtoverlay=norns-sharp-ls027b7dh01
 ```
 
-After reboot, find the framebuffer belonging to the panel:
+Reboot:
 
 ```sh
-for name in /sys/class/graphics/fb*/name; do printf '%s: ' "$name"; cat "$name"; done
+sudo reboot
 ```
 
-Copy the CM5 I/O configuration and set `dev` to that framebuffer:
+After reconnecting, verify the device:
 
 ```sh
-cp ~/norns/platform/cm5/matronrc.lua ~/matronrc.lua
-sudo usermod -aG video we
+ls -l /dev/spidev0.0
 ```
 
-The default is 15 fps because a complete 400x240 monochrome frame takes nearly
-50 ms at the panel's 2 MHz limit. `invert=true` gives black-on-white, and
-`stretch=true` fills 400x240 instead of preserving the 2:1 norns aspect ratio.
+The device normally belongs to the `spi` group. Add the norns user to it, then
+log out and back in (or reboot) so the new group is active:
 
-## Building for CM5
+```sh
+sudo usermod -aG spi we
+```
+
+Use your actual login name instead of `we` if it differs. Confirm access with:
+
+```sh
+id
+test -r /dev/spidev0.0 -a -w /dev/spidev0.0 && echo "SPI access OK"
+```
+
+## Standalone display test
+
+Install the small Python SPI binding and run the included test before building
+norns:
+
+```sh
+sudo apt install python3-spidev
+cd ~/norns
+python3 platform/cm5/test-sharp-memory.py
+```
+
+The display should show a checkerboard for ten seconds and then clear. The test
+uses the same active-high CS, 2 MHz clock, byte ordering, line chunking, and
+software VCOM commands as the matron backend. Do not run it while matron is
+using the display.
+
+If the script reports `Permission denied`, refresh the login after adding the
+user to the `spi` group. If it reports that active-high CS is unsupported, keep
+the display powered off and report the exact error; the CS line must not be
+driven with normal active-low polarity.
+
+## Building and configuring norns
 
 Install the dependencies from `readme-setup.md`, initialize submodules, and
 build a 64-bit Cortex-A76 release:
@@ -92,14 +109,25 @@ git submodule update --init --recursive
 ./waf -j4
 ```
 
-The `--cm5` option avoids the ARMv7-only floating-point flags used by older
-norns images and enables Cortex-A76 tuning.
+Copy the CM5 I/O configuration:
+
+```sh
+cp ~/norns/platform/cm5/matronrc.lua ~/matronrc.lua
+```
+
+The default configuration uses `/dev/spidev0.0`, a 2 MHz SPI clock, and 15
+frames per second. A complete frame takes about 50 ms at that clock rate.
+`invert=true` selects a paper-like black-on-white UI, and `stretch=true` fills
+400x240 instead of preserving the original 2:1 norns aspect ratio as a centered
+400x200 image.
+
+Software VCOM is maintained by matron even when the image does not change.
+Do not leave the display powered for an extended period while matron is stopped.
 
 ## Zoom AMS-22
 
-The [AMS-22 manual](https://zoomcorp.com/documents/2406/E_AMS-22.pdf) specifies
-USB Audio Class 2.0, two input/output channels, and 48 kHz support. Determine
-the stable ALSA card ID after connecting it:
+The AMS-22 is a USB Audio Class 2.0, two-channel interface with 48 kHz support.
+Determine its stable ALSA card ID after connecting it:
 
 ```sh
 cat /proc/asound/cards
