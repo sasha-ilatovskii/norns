@@ -105,9 +105,13 @@ build a 64-bit Cortex-A76 release:
 
 ```sh
 git submodule update --init --recursive
-./waf configure --release --cm5
-./waf -j4
+python3 platform/cm5/waf-python3.py configure --release --cm5
+python3 platform/cm5/waf-python3.py -j4
 ```
+
+The compatibility launcher is necessary on Debian 13 because its Python no
+longer includes APIs used by the repository's bundled Waf 2.0.14. It only
+adapts the Waf process; it does not alter the system Python installation.
 
 Copy the CM5 I/O configuration:
 
