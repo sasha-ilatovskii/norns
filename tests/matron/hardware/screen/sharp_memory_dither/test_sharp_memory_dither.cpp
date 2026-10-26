@@ -40,6 +40,54 @@ TEST_CASE("All 16 norns levels produce distinct ordered-dither coverage") {
     CHECK(previous_white == 64);
 }
 
+TEST_CASE("Edge contrast is the largest four-neighbor luminance difference") {
+    CHECK(sharp_memory_edge_contrast(100, 90, 120, 60, 101) == 40);
+    CHECK(sharp_memory_edge_contrast(0, 0, 0, 0, 255) == 255);
+    CHECK(sharp_memory_edge_contrast(255, 0, 255, 255, 255) == 255);
+}
+
+TEST_CASE("Edge-aware dithering preserves Bayer in low-contrast regions") {
+    for (uint32_t y = 0; y < 8; ++y) {
+        for (uint32_t x = 0; x < 8; ++x) {
+            for (int luminance = 0; luminance <= 255; ++luminance) {
+                CHECK(sharp_memory_edge_aware_dither_is_white(
+                          (uint8_t)luminance, 64, x, y, false) ==
+                      sharp_memory_dither_is_white((uint8_t)luminance, x, y, false));
+            }
+        }
+    }
+}
+
+TEST_CASE("Edge-aware dithering hardens high-contrast contours") {
+    for (uint32_t y = 0; y < 8; ++y) {
+        for (uint32_t x = 0; x < 8; ++x) {
+            CHECK_FALSE(sharp_memory_edge_aware_dither_is_white(128, 192, x, y, false));
+            CHECK(sharp_memory_edge_aware_dither_is_white(129, 192, x, y, false));
+            CHECK(sharp_memory_edge_aware_dither_is_white(128, 255, x, y, true));
+            CHECK_FALSE(sharp_memory_edge_aware_dither_is_white(129, 255, x, y, true));
+        }
+    }
+}
+
+TEST_CASE("Edge-aware dithering progressively reduces threshold variation") {
+    int low_contrast_white = 0;
+    int medium_contrast_white = 0;
+    int high_contrast_white = 0;
+    for (uint32_t y = 0; y < 8; ++y) {
+        for (uint32_t x = 0; x < 8; ++x) {
+            low_contrast_white +=
+                sharp_memory_edge_aware_dither_is_white(96, 64, x, y, false) ? 1 : 0;
+            medium_contrast_white +=
+                sharp_memory_edge_aware_dither_is_white(96, 128, x, y, false) ? 1 : 0;
+            high_contrast_white +=
+                sharp_memory_edge_aware_dither_is_white(96, 192, x, y, false) ? 1 : 0;
+        }
+    }
+    CHECK(low_contrast_white > medium_contrast_white);
+    CHECK(medium_contrast_white > high_contrast_white);
+    CHECK(high_contrast_white == 0);
+}
+
 TEST_CASE("Norns surface uses a centered integer scale") {
     const sharp_memory_viewport_t viewport = sharp_memory_fit_viewport(128, 64, 400, 240, false);
     CHECK(viewport.x == 8);

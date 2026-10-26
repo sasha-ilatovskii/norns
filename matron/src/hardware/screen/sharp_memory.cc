@@ -44,6 +44,7 @@ typedef struct _screen_sharp_memory_priv {
     uint32_t speed_hz;
     bool invert;
     bool stretch;
+    bool edge_aware;
     bool vcom;
     volatile bool refresh_running;
     pthread_t refresh_thread;
@@ -112,6 +113,32 @@ static bool config_boolean(lua_State *l, int table, const char *name, bool fallb
     return value;
 }
 
+static int config_dither(lua_State *l, int table, bool *edge_aware) {
+    lua_getfield(l, table, "dither");
+    const char *value = "bayer8";
+    if (lua_isstring(l, -1)) {
+        value = lua_tostring(l, -1);
+    } else if (!lua_isnil(l, -1)) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) config option 'dither' should be a string\n");
+        lua_pop(l, 1);
+        return -1;
+    }
+
+    if (strcmp(value, "bayer8") == 0) {
+        *edge_aware = false;
+    } else if (strcmp(value, "edge-aware") == 0) {
+        *edge_aware = true;
+    } else {
+        fprintf(stderr,
+                "ERROR (screen:sharp-memory) 'dither' must be 'bayer8' or 'edge-aware'\n");
+        lua_pop(l, 1);
+        return -1;
+    }
+
+    lua_pop(l, 1);
+    return 0;
+}
+
 static int screen_sharp_memory_config(matron_io_t *io, lua_State *l) {
     screen_sharp_memory_priv_t *priv = (screen_sharp_memory_priv_t *)io->data;
     memset(priv, 0, sizeof(*priv));
@@ -157,6 +184,14 @@ static int screen_sharp_memory_config(matron_io_t *io, lua_State *l) {
         return -1;
     }
     priv->speed_hz = (uint32_t)speed_hz;
+
+    if (config_dither(l, 2, &priv->edge_aware) != 0) {
+        free(priv->cs_chip);
+        free(priv->dev);
+        priv->cs_chip = NULL;
+        priv->dev = NULL;
+        return -1;
+    }
 
     priv->invert = config_boolean(l, 2, "invert", false);
     priv->stretch = config_boolean(l, 2, "stretch", false);
@@ -475,9 +510,10 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
     }
 
     fprintf(stderr,
-            "screen:sharp-memory: %s %dx%d, CS=%s:%u, %u Hz SPI, %d fps, dither=bayer8, invert=%s, stretch=%s\n",
+            "screen:sharp-memory: %s %dx%d, CS=%s:%u, %u Hz SPI, %d fps, dither=%s, invert=%s, stretch=%s\n",
             priv->dev, SHARP_MEMORY_WIDTH, SHARP_MEMORY_HEIGHT, priv->cs_chip,
             priv->cs_line_offset, priv->speed_hz, priv->fps,
+            priv->edge_aware ? "edge-aware" : "bayer8",
             priv->invert ? "yes" : "no", priv->stretch ? "yes" : "no");
     return 0;
 }
@@ -520,6 +556,15 @@ static void set_pixel(screen_sharp_memory_priv_t *priv, uint32_t x, uint32_t y, 
         priv->frame[offset] |= mask;
     else
         priv->frame[offset] &= (uint8_t)~mask;
+}
+
+static uint8_t source_luminance(const uint8_t *source_data,
+                                int source_stride,
+                                uint32_t x,
+                                uint32_t y) {
+    uint32_t argb;
+    memcpy(&argb, source_data + (size_t)y * source_stride + x * 4, 4);
+    return sharp_memory_luminance(argb);
 }
 
 static bool write_all(int fd, const void *data, size_t size) {
@@ -617,10 +662,27 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
                         (uint32_t)(((uint64_t)(x - viewport.x) * source_width) / viewport.width);
                     const uint32_t source_y =
                         (uint32_t)(((uint64_t)(y - viewport.y) * source_height) / viewport.height);
-                    uint32_t argb;
-                    memcpy(&argb, source_data + (size_t)source_y * source_stride + source_x * 4, 4);
-                    white = sharp_memory_dither_is_white(
-                        sharp_memory_luminance(argb), x - viewport.x, y - viewport.y, priv->invert);
+                    const uint8_t luminance =
+                        source_luminance(source_data, source_stride, source_x, source_y);
+                    if (priv->edge_aware) {
+                        const uint32_t left_x = source_x > 0 ? source_x - 1 : source_x;
+                        const uint32_t right_x =
+                            source_x + 1 < source_width ? source_x + 1 : source_x;
+                        const uint32_t above_y = source_y > 0 ? source_y - 1 : source_y;
+                        const uint32_t below_y =
+                            source_y + 1 < source_height ? source_y + 1 : source_y;
+                        const uint8_t contrast = sharp_memory_edge_contrast(
+                            luminance,
+                            source_luminance(source_data, source_stride, left_x, source_y),
+                            source_luminance(source_data, source_stride, right_x, source_y),
+                            source_luminance(source_data, source_stride, source_x, above_y),
+                            source_luminance(source_data, source_stride, source_x, below_y));
+                        white = sharp_memory_edge_aware_dither_is_white(
+                            luminance, contrast, x - viewport.x, y - viewport.y, priv->invert);
+                    } else {
+                        white = sharp_memory_dither_is_white(
+                            luminance, x - viewport.x, y - viewport.y, priv->invert);
+                    }
                 }
                 set_pixel(priv, x, y, white);
             }

@@ -3,8 +3,9 @@
 This port keeps the norns drawing API at 128x64 and adds a hardware output
 backend named `screen:sharp-memory`. By default the backend maps every Cairo
 pixel to an exact 3x3 block, yielding a centered 384x192 image on the 400x240
-panel. It uses deterministic 8x8 Bayer dithering to represent all 16 norns
-levels on a monochrome display.
+panel. It uses deterministic edge-aware 8x8 Bayer dithering to represent all
+16 norns levels on a monochrome display while keeping high-contrast contours
+clean.
 
 The backend speaks the Sharp Memory LCD protocol directly through Linux
 `spidev`, with the display's active-high chip select driven by a separate GPIO.
@@ -129,6 +130,11 @@ cp ~/norns/platform/cm5/matronrc.lua ~/matronrc.lua
 The default configuration uses `/dev/spidev0.0`, line 25 of the `pinctrl-rp1`
 GPIO chip for CS, a 2 MHz SPI clock, and 15 frames per second. A complete frame
 takes about 50 ms at that clock rate.
+`dither='edge-aware'` keeps the full Bayer pattern in flat and low-contrast
+areas, then progressively pulls its thresholds towards 50 percent as local
+Cairo-pixel contrast increases. This makes antialiased black/white contours
+more solid without adding temporal shimmer. Set `dither='bayer8'` to compare
+with the original ordered-dither mode.
 `invert=true` selects a paper-like black-on-white UI. With the default
 `stretch=false`, every 128x64 Cairo pixel occupies exactly 3x3 physical pixels,
 leaving 8-pixel side margins and 24-pixel top and bottom margins.

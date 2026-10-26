@@ -19,6 +19,10 @@ _boot.add_io('screen:sharp-memory', {
   -- 15 fps leaves some headroom for SPI and scheduler overhead.
   fps = 15,
 
+  -- Preserve Bayer 8x8 in flat areas while reducing its threshold variation
+  -- near high-contrast Cairo edges. Use 'bayer8' for the original mode.
+  dither = 'edge-aware',
+
   -- false preserves the original white-on-black norns appearance. Set true
   -- for a paper-like black-on-white display.
   invert = false,

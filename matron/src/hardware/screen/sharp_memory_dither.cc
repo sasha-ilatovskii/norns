@@ -71,6 +71,15 @@ static const uint8_t bayer8[64] = {
     21,
 };
 
+// Below this contrast, ordered dithering is left unchanged. Above the high
+// point, the Bayer threshold collapses to 50%, producing a solid logical edge.
+// Between the two points the amount of threshold modulation decreases
+// linearly. The wide transition keeps low-contrast graphics from acquiring a
+// bright or dark outline while cleaning up antialiased black/white contours.
+static const int edge_contrast_low = 64;
+static const int edge_contrast_high = 192;
+static const int dither_scale = 256;
+
 uint8_t sharp_memory_luminance(uint32_t argb) {
     const uint32_t red = (argb >> 16) & 0xff;
     const uint32_t green = (argb >> 8) & 0xff;
@@ -83,6 +92,50 @@ uint8_t sharp_memory_luminance(uint32_t argb) {
 
 bool sharp_memory_dither_is_white(uint8_t luminance, uint32_t x, uint32_t y, bool invert) {
     const uint8_t threshold = (uint8_t)(bayer8[(y & 7) * 8 + (x & 7)] * 4 + 2);
+    const bool white = luminance > threshold;
+    return invert ? !white : white;
+}
+
+static uint8_t difference(uint8_t first, uint8_t second) {
+    return first > second ? first - second : second - first;
+}
+
+uint8_t sharp_memory_edge_contrast(uint8_t center,
+                                   uint8_t left,
+                                   uint8_t right,
+                                   uint8_t above,
+                                   uint8_t below) {
+    uint8_t contrast = difference(center, left);
+    const uint8_t right_contrast = difference(center, right);
+    const uint8_t above_contrast = difference(center, above);
+    const uint8_t below_contrast = difference(center, below);
+    if (right_contrast > contrast)
+        contrast = right_contrast;
+    if (above_contrast > contrast)
+        contrast = above_contrast;
+    if (below_contrast > contrast)
+        contrast = below_contrast;
+    return contrast;
+}
+
+bool sharp_memory_edge_aware_dither_is_white(uint8_t luminance,
+                                             uint8_t edge_contrast,
+                                             uint32_t x,
+                                             uint32_t y,
+                                             bool invert) {
+    const int bayer_threshold = bayer8[(y & 7) * 8 + (x & 7)] * 4 + 2;
+    int strength = dither_scale;
+    if (edge_contrast >= edge_contrast_high) {
+        strength = 0;
+    } else if (edge_contrast > edge_contrast_low) {
+        strength = (edge_contrast_high - edge_contrast) * dither_scale /
+                   (edge_contrast_high - edge_contrast_low);
+    }
+
+    // Pull the ordered-dither threshold towards 50% as local contrast rises.
+    // Signed division intentionally rounds towards zero; the result stays in
+    // the original 2..254 threshold range.
+    const int threshold = 128 + (bayer_threshold - 128) * strength / dither_scale;
     const bool white = luminance > threshold;
     return invert ? !white : white;
 }
