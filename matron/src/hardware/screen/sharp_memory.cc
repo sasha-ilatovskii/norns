@@ -16,14 +16,17 @@
 #include "event_types.h"
 #include "events.h"
 #include "hardware/io.h"
+#include "hardware/screen.h"
 #include "hardware/screen/screens.h"
 #include "hardware/screen/sharp_memory_dither.h"
 #include "hardware/screen/sharp_memory_protocol.h"
+#include "hardware/screen/sharp_memory_render.h"
 
 #define SHARP_MEMORY_WIDTH 400
 #define SHARP_MEMORY_HEIGHT 240
 #define SHARP_MEMORY_ROWS_PER_TRANSFER 60
 #define SHARP_MEMORY_DEFAULT_SPEED_HZ 2000000
+#define SHARP_MEMORY_DEFAULT_TEXT_OUTLINE_THRESHOLD 96
 
 typedef struct _screen_sharp_memory_priv {
     char *dev;
@@ -41,6 +44,8 @@ typedef struct _screen_sharp_memory_priv {
     uint32_t speed_hz;
     bool invert;
     bool stretch;
+    bool text_outline;
+    uint8_t text_outline_threshold;
     bool vcom;
     volatile bool refresh_running;
     pthread_t refresh_thread;
@@ -157,6 +162,18 @@ static int screen_sharp_memory_config(matron_io_t *io, lua_State *l) {
 
     priv->invert = config_boolean(l, 2, "invert", false);
     priv->stretch = config_boolean(l, 2, "stretch", false);
+    priv->text_outline = config_boolean(l, 2, "text_outline", true);
+    const int text_outline_threshold = config_integer(
+        l, 2, "text_outline_threshold", SHARP_MEMORY_DEFAULT_TEXT_OUTLINE_THRESHOLD);
+    if (text_outline_threshold < 1 || text_outline_threshold > 255) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) 'text_outline_threshold' must be between 1 and 255\n");
+        free(priv->cs_chip);
+        free(priv->dev);
+        priv->cs_chip = NULL;
+        priv->dev = NULL;
+        return -1;
+    }
+    priv->text_outline_threshold = (uint8_t)text_outline_threshold;
     return 0;
 }
 
@@ -472,10 +489,11 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
     }
 
     fprintf(stderr,
-            "screen:sharp-memory: %s %dx%d, CS=%s:%u, %u Hz SPI, %d fps, dither=bayer8, invert=%s, stretch=%s\n",
+            "screen:sharp-memory: %s %dx%d, CS=%s:%u, %u Hz SPI, %d fps, dither=bayer8, invert=%s, stretch=%s, text-outline=%s@%u\n",
             priv->dev, SHARP_MEMORY_WIDTH, SHARP_MEMORY_HEIGHT, priv->cs_chip,
             priv->cs_line_offset, priv->speed_hz, priv->fps,
-            priv->invert ? "yes" : "no", priv->stretch ? "yes" : "no");
+            priv->invert ? "yes" : "no", priv->stretch ? "yes" : "no",
+            priv->text_outline ? "yes" : "no", priv->text_outline_threshold);
     return 0;
 }
 
@@ -531,6 +549,17 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
     const uint32_t source_height = (uint32_t)cairo_image_surface_get_height(priv->source);
     const int source_stride = cairo_image_surface_get_stride(priv->source);
     const uint8_t *source_data = cairo_image_surface_get_data(priv->source);
+    cairo_surface_t *text_mask = screen_get_text_mask();
+    const uint8_t *text_mask_data = NULL;
+    int text_mask_stride = 0;
+    if (priv->text_outline && text_mask != NULL &&
+        cairo_image_surface_get_format(text_mask) == CAIRO_FORMAT_A8 &&
+        cairo_image_surface_get_width(text_mask) == (int)source_width &&
+        cairo_image_surface_get_height(text_mask) == (int)source_height) {
+        cairo_surface_flush(text_mask);
+        text_mask_data = cairo_image_surface_get_data(text_mask);
+        text_mask_stride = cairo_image_surface_get_stride(text_mask);
+    }
     const sharp_memory_viewport_t viewport = sharp_memory_fit_viewport(
         source_width, source_height, SHARP_MEMORY_WIDTH, SHARP_MEMORY_HEIGHT, priv->stretch);
 
@@ -540,14 +569,27 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
                 bool white = priv->invert;
                 if (x >= viewport.x && x < viewport.x + viewport.width &&
                     y >= viewport.y && y < viewport.y + viewport.height) {
-                    const uint32_t source_x =
-                        (uint32_t)(((uint64_t)(x - viewport.x) * source_width) / viewport.width);
-                    const uint32_t source_y =
-                        (uint32_t)(((uint64_t)(y - viewport.y) * source_height) / viewport.height);
+                    uint32_t source_x;
+                    uint32_t source_y;
+                    sharp_memory_map_target_to_source(&viewport, source_width, source_height,
+                                                      (int)x, (int)y, &source_x, &source_y);
                     uint32_t argb;
                     memcpy(&argb, source_data + (size_t)source_y * source_stride + source_x * 4, 4);
+                    const uint8_t luminance = sharp_memory_luminance(argb);
                     white = sharp_memory_dither_is_white(
-                        sharp_memory_luminance(argb), x - viewport.x, y - viewport.y, priv->invert);
+                        luminance, x - viewport.x, y - viewport.y, priv->invert);
+
+                    if (text_mask_data != NULL &&
+                        text_mask_data[(size_t)source_y * text_mask_stride + source_x] >=
+                            priv->text_outline_threshold) {
+                        bool is_outline;
+                        const bool outline_white = sharp_memory_text_outline_is_white(
+                            source_data, source_stride, text_mask_data, text_mask_stride,
+                            &viewport, source_width, source_height, (int)x, (int)y,
+                            luminance, priv->text_outline_threshold, &is_outline);
+                        if (is_outline)
+                            white = priv->invert ? !outline_white : outline_white;
+                    }
                 }
                 set_pixel(priv, x, y, white);
             }

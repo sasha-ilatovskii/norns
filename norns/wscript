@@ -47,6 +47,7 @@ def build(bld):
             '../matron/src/hardware/screen/sharp_memory.cc',
             '../matron/src/hardware/screen/sharp_memory_dither.cc',
             '../matron/src/hardware/screen/sharp_memory_protocol.cc',
+            '../matron/src/hardware/screen/sharp_memory_render.cc',
             '../matron/src/hardware/screen/ssd1322_stub.cc',
         ]
     else:
