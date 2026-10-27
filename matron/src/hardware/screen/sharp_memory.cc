@@ -685,7 +685,8 @@ static bool semantic_text_shadow_at(const screen_sharp_memory_priv_t *priv,
 static bool semantic_stroke_mask_at(cairo_surface_t *surface,
                                     const sharp_memory_viewport_t *viewport,
                                     uint32_t viewport_x,
-                                    uint32_t viewport_y) {
+                                    uint32_t viewport_y,
+                                    uint8_t minimum_alpha) {
     if (surface == NULL)
         return false;
 
@@ -705,7 +706,7 @@ static bool semantic_stroke_mask_at(cairo_surface_t *surface,
 
     uint32_t argb;
     memcpy(&argb, stroke_data + (size_t)stroke_y * stroke_stride + stroke_x * 4, 4);
-    return (argb >> 24) >= 128;
+    return (argb >> 24) >= minimum_alpha;
 }
 
 static bool write_all(int fd, const void *data, size_t size) {
@@ -845,18 +846,24 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
                                 priv->tile_density_boost,
                                 priv->invert);
                         } else if (use_semantics && semantic_stroke_mask_at(
-                                       priv->stroke, &viewport, viewport_x, viewport_y)) {
+                                                        priv->stroke,
+                                                        &viewport,
+                                                        viewport_x,
+                                                        viewport_y,
+                                                        128)) {
                             white = !priv->invert;
                         } else if (use_semantics && semantic_stroke_mask_at(
-                                       priv->stroke_coverage,
-                                       &viewport,
-                                       viewport_x,
-                                       viewport_y)) {
-                            // This pixel belongs to a semantic stroke, but the
-                            // outline atlas intentionally left it empty.
+                                                        priv->stroke_coverage,
+                                                        &viewport,
+                                                        viewport_x,
+                                                        viewport_y,
+                                                        1)) {
+                            // Any canonical Cairo coverage claims the complete
+                            // logical 3x3 tile. If the physical atlas left this
+                            // pixel empty it must remain background.
                             white = priv->invert;
                         } else if (use_semantics && semantic_text_shadow_at(
-                                       priv, &viewport, viewport_x, viewport_y)) {
+                                                        priv, &viewport, viewport_x, viewport_y)) {
                             // Solid maximum-level ink: white in the logical
                             // norns palette, black in paper/inverted mode.
                             white = !priv->invert;

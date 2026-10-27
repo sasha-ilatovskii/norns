@@ -115,12 +115,6 @@ static void semantic_text_set_hard_antialias(void) {
     cairo_font_options_set_antialias(font_options, CAIRO_ANTIALIAS_NONE);
     cairo_set_font_options(semantic_stroke_cr, font_options);
     cairo_font_options_destroy(font_options);
-
-    font_options = cairo_font_options_create();
-    cairo_set_antialias(semantic_stroke_coverage_cr, CAIRO_ANTIALIAS_NONE);
-    cairo_font_options_set_antialias(font_options, CAIRO_ANTIALIAS_NONE);
-    cairo_set_font_options(semantic_stroke_coverage_cr, font_options);
-    cairo_font_options_destroy(font_options);
 }
 
 static void semantic_text_clear(void) {
@@ -205,10 +199,10 @@ static void semantic_stroke_draw(void) {
     sharp_memory_outline_render(
         semantic_stroke_cr, flat_path, semantic_stroke_surface, level, track_width_px);
 
-    // Claim the complete canonical stroke footprint independently of the
-    // sparse outline atlas. The backend uses this mask to force atlas gaps to
-    // the background instead of letting the original grayscale stroke dither
-    // through them.
+    // Claim the complete stroke footprint at canonical 128x64 resolution.
+    // The backend expands each touched logical pixel with the same mapping as
+    // the framebuffer, so half-pixel paths and antialiasing cannot drift away
+    // from the physical outline atlas.
     cairo_save(semantic_stroke_coverage_cr);
     cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_OVER);
     cairo_set_source_rgba(semantic_stroke_coverage_cr, 1.0, 1.0, 1.0, 1.0);
@@ -244,14 +238,23 @@ static void semantic_show_text(const char *text) {
     cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_CLEAR);
     cairo_show_text(semantic_stroke_cr, text);
     cairo_restore(semantic_stroke_cr);
+
+    // Text has its own hard semantic mask. Clear logical stroke ownership
+    // with the same hard glyph raster instead of the coverage context's
+    // canonical path antialiasing mode.
+    cairo_font_options_t *font_options = cairo_font_options_create();
+    cairo_font_options_set_antialias(font_options, CAIRO_ANTIALIAS_NONE);
     cairo_save(semantic_stroke_coverage_cr);
     cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_CLEAR);
+    cairo_set_antialias(semantic_stroke_coverage_cr, CAIRO_ANTIALIAS_NONE);
+    cairo_set_font_options(semantic_stroke_coverage_cr, font_options);
     cairo_show_text(semantic_stroke_coverage_cr, text);
     cairo_restore(semantic_stroke_coverage_cr);
+    cairo_font_options_destroy(font_options);
 
     // Font hinting can produce a slightly different advance at the stroke
-    // layer's 3x CTM. Keep both sidecar current points locked to canonical
-    // Cairo so later relative drawing commands cannot accumulate drift.
+    // layer's 3x CTM. Keep all sidecar current points locked to canonical Cairo
+    // so later relative drawing commands cannot accumulate drift.
     double x, y;
     cairo_get_current_point(cr, &x, &y);
     cairo_move_to(semantic_text_cr, x, y);
@@ -321,11 +324,7 @@ static void semantic_text_erase_raw_rectangle(double x, double y, double width, 
     cairo_save(semantic_stroke_coverage_cr);
     cairo_identity_matrix(semantic_stroke_coverage_cr);
     cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_CLEAR);
-    cairo_rectangle(semantic_stroke_coverage_cr,
-                    x * SEMANTIC_STROKE_SCALE,
-                    y * SEMANTIC_STROKE_SCALE,
-                    width * SEMANTIC_STROKE_SCALE,
-                    height * SEMANTIC_STROKE_SCALE);
+    cairo_rectangle(semantic_stroke_coverage_cr, x, y, width, height);
     cairo_fill(semantic_stroke_coverage_cr);
     cairo_restore(semantic_stroke_coverage_cr);
     cairo_append_path(semantic_stroke_coverage_cr, path);
@@ -345,17 +344,13 @@ void screen_init(void) {
         semantic_stroke_surface = cairo_image_surface_create(
             CAIRO_FORMAT_ARGB32, 128 * SEMANTIC_STROKE_SCALE, 64 * SEMANTIC_STROKE_SCALE);
         semantic_stroke_cr = cairo_create(semantic_stroke_surface);
-        semantic_stroke_coverage_surface = cairo_image_surface_create(
-            CAIRO_FORMAT_ARGB32, 128 * SEMANTIC_STROKE_SCALE, 64 * SEMANTIC_STROKE_SCALE);
+        semantic_stroke_coverage_surface =
+            cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 128, 64);
         semantic_stroke_coverage_cr = cairo_create(semantic_stroke_coverage_surface);
-        // Logical integer coordinates land on physical pixel centers. Without
-        // this offset a nominal one-pixel axis-aligned stroke can straddle two
-        // Sharp pixels when antialiasing is disabled.
-        cairo_translate(semantic_stroke_cr, 0.5, 0.5);
+        // Map logical Cairo geometry directly onto the exact 3x pixel grid.
+        // In particular, the half-integer coordinates used for crisp norns
+        // strokes must remain centered inside their logical 3x3 tiles.
         cairo_scale(semantic_stroke_cr, SEMANTIC_STROKE_SCALE, SEMANTIC_STROKE_SCALE);
-        cairo_translate(semantic_stroke_coverage_cr, 0.5, 0.5);
-        cairo_scale(
-            semantic_stroke_coverage_cr, SEMANTIC_STROKE_SCALE, SEMANTIC_STROKE_SCALE);
         semantic_text_clear();
         semantic_text_set_hard_antialias();
     }
@@ -707,8 +702,11 @@ void screen_aa(int s) {
     }
     cairo_set_font_options(cr, font_options);
     cairo_font_options_destroy(font_options);
-    if (semantic_text_active())
+    if (semantic_text_active()) {
+        cairo_set_antialias(semantic_stroke_coverage_cr,
+                            s == 0 ? CAIRO_ANTIALIAS_NONE : CAIRO_ANTIALIAS_DEFAULT);
         semantic_text_set_hard_antialias();
+    }
 }
 
 void screen_brightness(int v) {

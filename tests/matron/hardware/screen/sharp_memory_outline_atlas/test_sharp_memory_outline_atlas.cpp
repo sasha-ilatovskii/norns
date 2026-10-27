@@ -111,6 +111,69 @@ TEST_CASE("three atlas tracks occupy exactly three physical pixels across a path
     cairo_surface_destroy(path_surface);
 }
 
+TEST_CASE("half-pixel rectangles align the physical atlas with logical ownership") {
+    cairo_surface_t *ownership =
+        cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 128, 64);
+    cairo_t *ownership_context = cairo_create(ownership);
+    cairo_set_source_rgba(ownership_context, 1.0, 1.0, 1.0, 1.0);
+    cairo_set_line_width(ownership_context, 1.0);
+    cairo_rectangle(ownership_context, 0.5, 13.5, 127.0, 2.0);
+    cairo_stroke(ownership_context);
+    cairo_surface_flush(ownership);
+
+    const uint32_t *ownership_pixels =
+        reinterpret_cast<const uint32_t *>(cairo_image_surface_get_data(ownership));
+    const int ownership_stride = cairo_image_surface_get_stride(ownership) / sizeof(uint32_t);
+    CHECK((ownership_pixels[12 * ownership_stride + 64] >> 24) == 0);
+    CHECK((ownership_pixels[13 * ownership_stride + 64] >> 24) != 0);
+    CHECK((ownership_pixels[14 * ownership_stride + 64] >> 24) == 0);
+    CHECK((ownership_pixels[15 * ownership_stride + 64] >> 24) != 0);
+    CHECK((ownership_pixels[16 * ownership_stride + 64] >> 24) == 0);
+
+    cairo_surface_t *path_surface =
+        cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 384, 192);
+    cairo_t *path_context = cairo_create(path_surface);
+    cairo_scale(path_context, 3.0, 3.0);
+    cairo_rectangle(path_context, 0.5, 13.5, 127.0, 2.0);
+    cairo_path_t *flat_path = cairo_copy_path_flat(path_context);
+
+    cairo_surface_t *atlas =
+        cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 384, 192);
+    sharp_memory_outline_render(path_context, flat_path, atlas, 2, 1.0);
+    cairo_surface_flush(atlas);
+
+    const uint32_t *atlas_pixels =
+        reinterpret_cast<const uint32_t *>(cairo_image_surface_get_data(atlas));
+    const int atlas_stride = cairo_image_surface_get_stride(atlas) / sizeof(uint32_t);
+    CHECK(atlas_pixels[38 * atlas_stride + 192] == 0);
+    CHECK(atlas_pixels[39 * atlas_stride + 192] == 0);
+    CHECK(atlas_pixels[40 * atlas_stride + 192] != 0);
+    CHECK(atlas_pixels[41 * atlas_stride + 192] == 0);
+    CHECK(atlas_pixels[42 * atlas_stride + 192] == 0);
+    CHECK(atlas_pixels[44 * atlas_stride + 192] == 0);
+    CHECK(atlas_pixels[45 * atlas_stride + 192] == 0);
+    CHECK(atlas_pixels[46 * atlas_stride + 192] != 0);
+    CHECK(atlas_pixels[47 * atlas_stride + 192] == 0);
+    CHECK(atlas_pixels[48 * atlas_stride + 192] == 0);
+
+    for (int y = 0; y < 192; ++y) {
+        for (int x = 0; x < 384; ++x) {
+            if (atlas_pixels[y * atlas_stride + x] == 0)
+                continue;
+            CAPTURE(x);
+            CAPTURE(y);
+            CHECK((ownership_pixels[(y / 3) * ownership_stride + x / 3] >> 24) != 0);
+        }
+    }
+
+    cairo_surface_destroy(atlas);
+    cairo_path_destroy(flat_path);
+    cairo_destroy(path_context);
+    cairo_surface_destroy(path_surface);
+    cairo_destroy(ownership_context);
+    cairo_surface_destroy(ownership);
+}
+
 TEST_CASE("outline style clamps out-of-range brightness") {
     const sharp_memory_outline_style_t maximum = sharp_memory_outline_style(15);
     const sharp_memory_outline_style_t clamped = sharp_memory_outline_style(255);

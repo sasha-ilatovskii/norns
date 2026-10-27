@@ -161,8 +161,10 @@ paths. The procedural outline atlas consists of upper, center, and lower tracks
 offset along the local path normal. At the default `screen.line_width(1)`, each
 track is one physical Sharp pixel wide, making a fully lit level-15 stroke
 three pixels wide. Larger API line widths scale the three tracks together.
-The renderer also keeps a separate mask for the complete original stroke
-footprint. Pixels inside that footprint which are absent from the atlas are
+The renderer also keeps a separate 128x64 ownership mask for the complete
+original stroke footprint. It is rasterized with the canonical Cairo geometry
+and antialiasing, then expanded with the same exact 3x3 mapping as the main
+framebuffer. Physical pixels owned by the stroke but absent from the atlas are
 forced to the background, so the grayscale Cairo stroke cannot leak through
 the intended gaps as a second layer of 3x3 dithering.
 
