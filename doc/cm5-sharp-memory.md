@@ -168,11 +168,11 @@ framebuffer. Physical pixels owned by the stroke but absent from the atlas are
 forced to the background, so the grayscale Cairo stroke cannot leak through
 the intended gaps as a second layer of 3x3 dithering.
 
-Levels 1 through 4 draw only the center track with `16/1`, `24/1`, `40/1`,
-and `64/1` dash/space periods. Level 5 makes the center track solid. Levels 6
-through 14 progressively fill the upper and lower tracks in 16-pixel steps
-within an 80-pixel period; their phases are 9 and 49 pixels so gaps do not line
-up across the contour. Level 15 makes all three tracks solid. Filled paths,
+Levels 1 through 7 draw the center track as `1/1` through `7/1` dash/space
+patterns. These compact physical-pixel periods remain visible even on a short
+four-Cairo-pixel indicator. Levels 8 through 12 keep the center solid and add
+staggered four-pixel-period side tracks. Levels 13 and 14 keep two tracks solid
+while filling the third; level 15 makes all three tracks solid. Filled paths,
 images, `poke`, and offscreen images continue through the normal 3x3 tile
 renderer. Frames that use a complex Cairo blend operator safely fall back to
 that normal framebuffer renderer.

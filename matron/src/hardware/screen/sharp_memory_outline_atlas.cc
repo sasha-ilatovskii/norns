@@ -16,26 +16,29 @@ struct contour_t {
     bool closed = false;
 };
 
-// This is the procedural form of outline_atlas.json. Its original metadata
-// specifies two-pixel tracks; the Sharp backend intentionally uses one
-// physical pixel per track while retaining its periods, fill order, and phase.
+// Compact physical-pixel periods keep brightness visible on short UI strokes.
+// In particular, a four-Cairo-pixel step marker is only twelve Sharp pixels
+// long, so the former 16--80 pixel dashes made levels 1 through 6 look solid
+// and nearly identical. Levels 1--7 now use the requested N-on/1-off center
+// track. Levels 8--14 progressively add staggered side tracks; level 15 is a
+// solid three-pixel contour.
 static const sharp_memory_outline_style_t styles[16] = {
-    {1, {0, 0, 0}, {9, 0, 49}},
-    {17, {0, 16, 0}, {9, 0, 49}},
-    {25, {0, 24, 0}, {9, 0, 49}},
-    {41, {0, 40, 0}, {9, 0, 49}},
-    {65, {0, 64, 0}, {9, 0, 49}},
-    {80, {0, 80, 0}, {9, 0, 49}},
-    {80, {16, 80, 0}, {9, 0, 49}},
-    {80, {16, 80, 16}, {9, 0, 49}},
-    {80, {32, 80, 16}, {9, 0, 49}},
-    {80, {32, 80, 32}, {9, 0, 49}},
-    {80, {48, 80, 32}, {9, 0, 49}},
-    {80, {48, 80, 48}, {9, 0, 49}},
-    {80, {64, 80, 48}, {9, 0, 49}},
-    {80, {64, 80, 64}, {9, 0, 49}},
-    {80, {80, 80, 64}, {9, 0, 49}},
-    {80, {80, 80, 80}, {9, 0, 49}},
+    {1, {0, 0, 0}, {0, 0, 0}},
+    {2, {0, 1, 0}, {0, 0, 0}},
+    {3, {0, 2, 0}, {0, 0, 0}},
+    {4, {0, 3, 0}, {0, 0, 0}},
+    {5, {0, 4, 0}, {0, 0, 0}},
+    {6, {0, 5, 0}, {0, 0, 0}},
+    {7, {0, 6, 0}, {0, 0, 0}},
+    {8, {0, 7, 0}, {0, 0, 0}},
+    {4, {1, 4, 0}, {0, 0, 2}},
+    {4, {1, 4, 1}, {0, 0, 2}},
+    {4, {2, 4, 1}, {0, 0, 2}},
+    {4, {2, 4, 2}, {0, 0, 2}},
+    {4, {3, 4, 2}, {0, 0, 2}},
+    {4, {4, 4, 2}, {0, 0, 2}},
+    {4, {4, 4, 3}, {0, 0, 2}},
+    {4, {4, 4, 4}, {0, 0, 2}},
 };
 
 static point_t add(point_t a, point_t b) {

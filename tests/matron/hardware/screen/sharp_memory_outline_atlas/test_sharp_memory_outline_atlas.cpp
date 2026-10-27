@@ -2,42 +2,42 @@
 
 #include "hardware/screen/sharp_memory_outline_atlas.h"
 
-TEST_CASE("outline atlas preserves the supplied periods and track fill order") {
+TEST_CASE("outline atlas uses compact periods and ordered track fill") {
     const uint8_t expected_periods[16] = {
         1,
-        17,
-        25,
-        41,
-        65,
-        80,
-        80,
-        80,
-        80,
-        80,
-        80,
-        80,
-        80,
-        80,
-        80,
-        80,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        4,
+        4,
+        4,
+        4,
+        4,
+        4,
+        4,
+        4,
     };
     const uint8_t expected_dashes[16][SHARP_MEMORY_OUTLINE_TRACK_COUNT] = {
         {0, 0, 0},
-        {0, 16, 0},
-        {0, 24, 0},
-        {0, 40, 0},
-        {0, 64, 0},
-        {0, 80, 0},
-        {16, 80, 0},
-        {16, 80, 16},
-        {32, 80, 16},
-        {32, 80, 32},
-        {48, 80, 32},
-        {48, 80, 48},
-        {64, 80, 48},
-        {64, 80, 64},
-        {80, 80, 64},
-        {80, 80, 80},
+        {0, 1, 0},
+        {0, 2, 0},
+        {0, 3, 0},
+        {0, 4, 0},
+        {0, 5, 0},
+        {0, 6, 0},
+        {0, 7, 0},
+        {1, 4, 0},
+        {1, 4, 1},
+        {2, 4, 1},
+        {2, 4, 2},
+        {3, 4, 2},
+        {4, 4, 2},
+        {4, 4, 3},
+        {4, 4, 4},
     };
 
     for (uint8_t level = 0; level < 16; ++level) {
@@ -45,10 +45,46 @@ TEST_CASE("outline atlas preserves the supplied periods and track fill order") {
         CHECK(style.period_px == expected_periods[level]);
         for (int track = 0; track < SHARP_MEMORY_OUTLINE_TRACK_COUNT; ++track)
             CHECK(style.dash_px[track] == expected_dashes[level][track]);
-        CHECK(style.phase_px[SHARP_MEMORY_OUTLINE_UPPER] == 9);
+        CHECK(style.phase_px[SHARP_MEMORY_OUTLINE_UPPER] == 0);
         CHECK(style.phase_px[SHARP_MEMORY_OUTLINE_CENTER] == 0);
-        CHECK(style.phase_px[SHARP_MEMORY_OUTLINE_LOWER] == 49);
+        CHECK(style.phase_px[SHARP_MEMORY_OUTLINE_LOWER] == (level >= 8 ? 2 : 0));
     }
+}
+
+TEST_CASE("short step indicators retain distinct low brightness levels") {
+    cairo_surface_t *path_surface =
+        cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 32, 12);
+    cairo_t *path_context = cairo_create(path_surface);
+    cairo_move_to(path_context, 8.5, 5.5);
+    cairo_line_to(path_context, 20.5, 5.5);
+    cairo_path_t *flat_path = cairo_copy_path_flat(path_context);
+
+    size_t previous_count = 0;
+    const uint8_t levels[] = {1, 4, 6, 15};
+    for (uint8_t level : levels) {
+        cairo_surface_t *target =
+            cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 32, 12);
+        sharp_memory_outline_render(path_context, flat_path, target, level, 1.0);
+        cairo_surface_flush(target);
+
+        const uint32_t *pixels =
+            reinterpret_cast<const uint32_t *>(cairo_image_surface_get_data(target));
+        const int stride = cairo_image_surface_get_stride(target) / sizeof(uint32_t);
+        size_t count = 0;
+        for (int y = 0; y < 12; ++y) {
+            for (int x = 0; x < 32; ++x)
+                count += pixels[y * stride + x] != 0;
+        }
+        CAPTURE(level);
+        CAPTURE(count);
+        CHECK(count > previous_count);
+        previous_count = count;
+        cairo_surface_destroy(target);
+    }
+
+    cairo_path_destroy(flat_path);
+    cairo_destroy(path_context);
+    cairo_surface_destroy(path_surface);
 }
 
 TEST_CASE("outline atlas brightness has strictly increasing mean coverage") {
@@ -139,21 +175,21 @@ TEST_CASE("half-pixel rectangles align the physical atlas with logical ownership
 
     cairo_surface_t *atlas =
         cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 384, 192);
-    sharp_memory_outline_render(path_context, flat_path, atlas, 2, 1.0);
+    sharp_memory_outline_render(path_context, flat_path, atlas, 15, 1.0);
     cairo_surface_flush(atlas);
 
     const uint32_t *atlas_pixels =
         reinterpret_cast<const uint32_t *>(cairo_image_surface_get_data(atlas));
     const int atlas_stride = cairo_image_surface_get_stride(atlas) / sizeof(uint32_t);
     CHECK(atlas_pixels[38 * atlas_stride + 192] == 0);
-    CHECK(atlas_pixels[39 * atlas_stride + 192] == 0);
+    CHECK(atlas_pixels[39 * atlas_stride + 192] != 0);
     CHECK(atlas_pixels[40 * atlas_stride + 192] != 0);
-    CHECK(atlas_pixels[41 * atlas_stride + 192] == 0);
+    CHECK(atlas_pixels[41 * atlas_stride + 192] != 0);
     CHECK(atlas_pixels[42 * atlas_stride + 192] == 0);
     CHECK(atlas_pixels[44 * atlas_stride + 192] == 0);
-    CHECK(atlas_pixels[45 * atlas_stride + 192] == 0);
+    CHECK(atlas_pixels[45 * atlas_stride + 192] != 0);
     CHECK(atlas_pixels[46 * atlas_stride + 192] != 0);
-    CHECK(atlas_pixels[47 * atlas_stride + 192] == 0);
+    CHECK(atlas_pixels[47 * atlas_stride + 192] != 0);
     CHECK(atlas_pixels[48 * atlas_stride + 192] == 0);
 
     for (int y = 0; y < 192; ++y) {
