@@ -138,9 +138,20 @@ static void semantic_text_clear(void) {
 }
 
 static uint8_t semantic_stroke_level(void) {
-    // Do not treat cairo_get_source() as semantic metadata: temporary source
-    // patterns and context state can make an RGBA query unreliable. Keep the
-    // exact screen.level value, including across screen.save()/restore().
+    // Capture the level from the canonical context at stroke time. This is
+    // the source that Cairo actually uses for the 128x64 framebuffer, so it
+    // also remains authoritative when sidecar context state has temporarily
+    // diverged. Non-solid sources fall back to the tracked screen.level.
+    double red = 0.0;
+    double green = 0.0;
+    double blue = 0.0;
+    double alpha = 0.0;
+    if (cr == cr_primary &&
+        cairo_pattern_get_rgba(cairo_get_source(cr), &red, &green, &blue, &alpha) ==
+            CAIRO_STATUS_SUCCESS) {
+        int level = (int)floor(red * 15.0 + 0.5);
+        return (uint8_t)(level < 0 ? 0 : (level > 15 ? 15 : level));
+    }
     return semantic_stroke_level_current;
 }
 
@@ -165,11 +176,10 @@ static void semantic_stroke_append_and_stroke(const cairo_path_t *path,
     cairo_stroke(semantic_stroke_cr);
 }
 
-static void semantic_stroke_draw(void) {
+static void semantic_stroke_draw(uint8_t level) {
     cairo_path_t *path = cairo_copy_path(semantic_stroke_cr);
     cairo_path_t *flat_path = cairo_copy_path_flat(semantic_stroke_cr);
     const double api_width = cairo_get_line_width(semantic_stroke_cr);
-    const uint8_t level = semantic_stroke_level();
 
     // The semantic context has a permanent 3x base transform. Remove that
     // scale when translating screen.line_width into a physical track width;
@@ -925,10 +935,12 @@ void screen_close_path(void) {
 }
 
 void screen_stroke(void) {
+    const bool draw_semantic_stroke = semantic_text_active();
+    const uint8_t semantic_level = draw_semantic_stroke ? semantic_stroke_level() : 0;
     cairo_stroke(cr);
-    if (semantic_text_active()) {
+    if (draw_semantic_stroke) {
         semantic_text_erase_path(true);
-        semantic_stroke_draw();
+        semantic_stroke_draw(semantic_level);
     }
 }
 

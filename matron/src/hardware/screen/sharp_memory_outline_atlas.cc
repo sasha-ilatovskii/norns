@@ -65,6 +65,51 @@ static bool same_point(point_t a, point_t b) {
     return std::abs(a.x - b.x) < 1e-6 && std::abs(a.y - b.y) < 1e-6;
 }
 
+static bool integer_coordinate(double value) {
+    return std::abs(value - std::round(value)) < 1e-6;
+}
+
+static bool odd_integer_width(double width) {
+    const double rounded = std::round(width);
+    return std::abs(width - rounded) < 1e-6 &&
+           (static_cast<int>(rounded) & 1) != 0;
+}
+
+static void align_contour_to_cairo_pixels(contour_t &contour, double track_width_px) {
+    // With antialiasing disabled, Cairo assigns an odd-width stroke centered
+    // on an integer coordinate to the pixel immediately above/left. At 3x,
+    // the geometric outline otherwise lands one physical pixel below/right
+    // of the expanded canonical coverage. Only shift normal to axis-aligned
+    // segments: their endpoints along the tangent are already correct.
+    if (!odd_integer_width(track_width_px) || contour.points.size() < 2)
+        return;
+
+    std::vector<bool> align_x(contour.points.size(), false);
+    std::vector<bool> align_y(contour.points.size(), false);
+    const size_t segment_count = contour.closed ? contour.points.size()
+                                                : contour.points.size() - 1;
+    for (size_t index = 0; index < segment_count; ++index) {
+        const size_t next = (index + 1) % contour.points.size();
+        const point_t start = contour.points[index];
+        const point_t end = contour.points[next];
+        if (std::abs(start.x - end.x) < 1e-6 && integer_coordinate(start.x)) {
+            align_x[index] = true;
+            align_x[next] = true;
+        }
+        if (std::abs(start.y - end.y) < 1e-6 && integer_coordinate(start.y)) {
+            align_y[index] = true;
+            align_y[next] = true;
+        }
+    }
+
+    for (size_t index = 0; index < contour.points.size(); ++index) {
+        if (align_x[index])
+            contour.points[index].x -= 1.0;
+        if (align_y[index])
+            contour.points[index].y -= 1.0;
+    }
+}
+
 static point_t segment_normal(point_t start, point_t end) {
     const point_t direction = subtract(end, start);
     const double segment_length = length(direction);
@@ -187,9 +232,12 @@ void sharp_memory_outline_render(cairo_t *path_context,
         track_width_px <= 0.0)
         return;
 
-    const std::vector<contour_t> contours = read_contours(path_context, flat_path);
+    std::vector<contour_t> contours = read_contours(path_context, flat_path);
     if (contours.empty())
         return;
+
+    for (contour_t &contour : contours)
+        align_contour_to_cairo_pixels(contour, track_width_px);
 
     const sharp_memory_outline_style_t style = sharp_memory_outline_style(level);
     cairo_t *context = cairo_create(target);

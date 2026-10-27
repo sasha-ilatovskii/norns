@@ -210,6 +210,69 @@ TEST_CASE("half-pixel rectangles align the physical atlas with logical ownership
     cairo_surface_destroy(ownership);
 }
 
+TEST_CASE("integer axis-aligned strokes align with Cairo pixel ownership") {
+    const auto check_stroke = [](double x1, double y1, double x2, double y2) {
+        cairo_surface_t *ownership =
+            cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 128, 64);
+        cairo_t *ownership_context = cairo_create(ownership);
+        cairo_set_antialias(ownership_context, CAIRO_ANTIALIAS_NONE);
+        cairo_set_source_rgba(ownership_context, 1.0, 1.0, 1.0, 1.0);
+        cairo_set_line_width(ownership_context, 1.0);
+        cairo_move_to(ownership_context, x1, y1);
+        cairo_line_to(ownership_context, x2, y2);
+        cairo_stroke(ownership_context);
+        cairo_surface_flush(ownership);
+
+        const uint32_t *ownership_pixels =
+            reinterpret_cast<const uint32_t *>(cairo_image_surface_get_data(ownership));
+        const int ownership_stride =
+            cairo_image_surface_get_stride(ownership) / sizeof(uint32_t);
+
+        cairo_surface_t *path_surface =
+            cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 384, 192);
+        cairo_t *path_context = cairo_create(path_surface);
+        cairo_scale(path_context, 3.0, 3.0);
+        cairo_move_to(path_context, x1, y1);
+        cairo_line_to(path_context, x2, y2);
+        cairo_path_t *flat_path = cairo_copy_path_flat(path_context);
+
+        cairo_surface_t *atlas =
+            cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 384, 192);
+        sharp_memory_outline_render(path_context, flat_path, atlas, 15, 1.0);
+        cairo_surface_flush(atlas);
+
+        const uint32_t *atlas_pixels =
+            reinterpret_cast<const uint32_t *>(cairo_image_surface_get_data(atlas));
+        const int atlas_stride = cairo_image_surface_get_stride(atlas) / sizeof(uint32_t);
+        size_t atlas_count = 0;
+        for (int y = 0; y < 192; ++y) {
+            for (int x = 0; x < 384; ++x) {
+                if (atlas_pixels[y * atlas_stride + x] == 0)
+                    continue;
+                ++atlas_count;
+                CAPTURE(x);
+                CAPTURE(y);
+                CHECK((ownership_pixels[(y / 3) * ownership_stride + x / 3] >> 24) != 0);
+            }
+        }
+        CHECK(atlas_count == 36);
+
+        cairo_surface_destroy(atlas);
+        cairo_path_destroy(flat_path);
+        cairo_destroy(path_context);
+        cairo_surface_destroy(path_surface);
+        cairo_destroy(ownership_context);
+        cairo_surface_destroy(ownership);
+    };
+
+    SUBCASE("horizontal") {
+        check_stroke(32.0, 27.0, 36.0, 27.0);
+    }
+    SUBCASE("vertical") {
+        check_stroke(32.0, 10.0, 32.0, 14.0);
+    }
+}
+
 TEST_CASE("outline style clamps out-of-range brightness") {
     const sharp_memory_outline_style_t maximum = sharp_memory_outline_style(15);
     const sharp_memory_outline_style_t clamped = sharp_memory_outline_style(255);
