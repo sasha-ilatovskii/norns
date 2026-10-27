@@ -27,6 +27,16 @@
 #define SHARP_MEMORY_DUMP_TRIGGER "/tmp/dump-sharp-frame"
 #define SHARP_MEMORY_DUMP_PATH "/tmp/sharp-frame.pbm"
 #define SHARP_MEMORY_DUMP_TEMP_PATH "/tmp/sharp-frame.pbm.tmp"
+#define SHARP_MEMORY_SOURCE_DUMP_PATH "/tmp/sharp-source.png"
+#define SHARP_MEMORY_SOURCE_DUMP_TEMP_PATH "/tmp/sharp-source.png.tmp"
+#define SHARP_MEMORY_TEXT_DUMP_PATH "/tmp/sharp-text.png"
+#define SHARP_MEMORY_TEXT_DUMP_TEMP_PATH "/tmp/sharp-text.png.tmp"
+#define SHARP_MEMORY_STROKE_DUMP_PATH "/tmp/sharp-stroke.png"
+#define SHARP_MEMORY_STROKE_DUMP_TEMP_PATH "/tmp/sharp-stroke.png.tmp"
+#define SHARP_MEMORY_COVERAGE_DUMP_PATH "/tmp/sharp-coverage.png"
+#define SHARP_MEMORY_COVERAGE_DUMP_TEMP_PATH "/tmp/sharp-coverage.png.tmp"
+#define SHARP_MEMORY_SEMANTICS_DUMP_PATH "/tmp/sharp-semantics.png"
+#define SHARP_MEMORY_SEMANTICS_DUMP_TEMP_PATH "/tmp/sharp-semantics.png.tmp"
 
 typedef enum _sharp_memory_dither_mode {
     SHARP_MEMORY_DITHER_BAYER8,
@@ -682,31 +692,41 @@ static bool semantic_text_shadow_at(const screen_sharp_memory_priv_t *priv,
     return false;
 }
 
+static bool semantic_surface_pixel_at(cairo_surface_t *surface,
+                                      const sharp_memory_viewport_t *viewport,
+                                      uint32_t viewport_x,
+                                      uint32_t viewport_y,
+                                      uint32_t *argb) {
+    if (surface == NULL || viewport->width == 0 || viewport->height == 0 ||
+        viewport_x >= viewport->width || viewport_y >= viewport->height)
+        return false;
+
+    const uint32_t surface_width = (uint32_t)cairo_image_surface_get_width(surface);
+    const uint32_t surface_height = (uint32_t)cairo_image_surface_get_height(surface);
+    if (surface_width == 0 || surface_height == 0)
+        return false;
+
+    const uint32_t surface_x =
+        (uint32_t)(((uint64_t)viewport_x * surface_width) / viewport->width);
+    const uint32_t surface_y =
+        (uint32_t)(((uint64_t)viewport_y * surface_height) / viewport->height);
+    const int surface_stride = cairo_image_surface_get_stride(surface);
+    const uint8_t *surface_data = cairo_image_surface_get_data(surface);
+    if (surface_data == NULL)
+        return false;
+
+    memcpy(argb, surface_data + (size_t)surface_y * surface_stride + surface_x * 4, 4);
+    return true;
+}
+
 static bool semantic_stroke_mask_at(cairo_surface_t *surface,
                                     const sharp_memory_viewport_t *viewport,
                                     uint32_t viewport_x,
                                     uint32_t viewport_y,
                                     uint8_t minimum_alpha) {
-    if (surface == NULL)
-        return false;
-
-    const uint32_t stroke_width = (uint32_t)cairo_image_surface_get_width(surface);
-    const uint32_t stroke_height = (uint32_t)cairo_image_surface_get_height(surface);
-    if (stroke_width == 0 || stroke_height == 0)
-        return false;
-
-    const uint32_t stroke_x =
-        (uint32_t)(((uint64_t)viewport_x * stroke_width) / viewport->width);
-    const uint32_t stroke_y =
-        (uint32_t)(((uint64_t)viewport_y * stroke_height) / viewport->height);
-    const int stroke_stride = cairo_image_surface_get_stride(surface);
-    const uint8_t *stroke_data = cairo_image_surface_get_data(surface);
-    if (stroke_data == NULL)
-        return false;
-
     uint32_t argb;
-    memcpy(&argb, stroke_data + (size_t)stroke_y * stroke_stride + stroke_x * 4, 4);
-    return (argb >> 24) >= minimum_alpha;
+    return semantic_surface_pixel_at(surface, viewport, viewport_x, viewport_y, &argb) &&
+           (argb >> 24) >= minimum_alpha;
 }
 
 static bool write_all(int fd, const void *data, size_t size) {
@@ -728,7 +748,143 @@ static bool write_all(int fd, const void *data, size_t size) {
     return true;
 }
 
-static void dump_frame_if_requested(const screen_sharp_memory_priv_t *priv) {
+typedef struct _sharp_memory_png_writer {
+    int fd;
+    int error;
+} sharp_memory_png_writer_t;
+
+static cairo_status_t dump_png_write(void *closure,
+                                     const unsigned char *data,
+                                     unsigned int length) {
+    sharp_memory_png_writer_t *writer = (sharp_memory_png_writer_t *)closure;
+    if (write_all(writer->fd, data, length))
+        return CAIRO_STATUS_SUCCESS;
+    writer->error = errno;
+    return CAIRO_STATUS_WRITE_ERROR;
+}
+
+static bool dump_png_surface(cairo_surface_t *surface,
+                             const char *temporary_path,
+                             const char *path) {
+    if (surface == NULL) {
+        // Do not leave a previous capture behind under the name of a surface
+        // that is not bound in the current process.
+        unlink(temporary_path);
+        unlink(path);
+        return true;
+    }
+
+    const int fd = open(temporary_path,
+                        O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                        0644);
+    if (fd < 0) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) cannot open %s: %s\n",
+                temporary_path,
+                strerror(errno));
+        return false;
+    }
+
+    sharp_memory_png_writer_t writer = {fd, 0};
+    cairo_surface_flush(surface);
+    const cairo_status_t status =
+        cairo_surface_write_to_png_stream(surface, dump_png_write, &writer);
+    bool ok = status == CAIRO_STATUS_SUCCESS;
+    int dump_errno = writer.error;
+    if (close(fd) != 0 && ok) {
+        ok = false;
+        dump_errno = errno;
+    }
+    if (ok && rename(temporary_path, path) != 0) {
+        ok = false;
+        dump_errno = errno;
+    }
+
+    if (!ok) {
+        unlink(temporary_path);
+        if (dump_errno != 0) {
+            fprintf(stderr, "ERROR (screen:sharp-memory) cannot write %s: %s\n",
+                    path,
+                    strerror(dump_errno));
+        } else {
+            fprintf(stderr, "ERROR (screen:sharp-memory) cannot write %s: %s\n",
+                    path,
+                    cairo_status_to_string(status));
+        }
+        return false;
+    }
+    return true;
+}
+
+static cairo_surface_t *semantic_debug_composite(
+    const screen_sharp_memory_priv_t *priv,
+    const sharp_memory_viewport_t *viewport) {
+    if (priv->source == NULL || viewport->width == 0 || viewport->height == 0)
+        return NULL;
+
+    const uint32_t source_width = (uint32_t)cairo_image_surface_get_width(priv->source);
+    const uint32_t source_height = (uint32_t)cairo_image_surface_get_height(priv->source);
+    const int source_stride = cairo_image_surface_get_stride(priv->source);
+    const uint8_t *source_data = cairo_image_surface_get_data(priv->source);
+    if (source_data == NULL || source_width == 0 || source_height == 0)
+        return NULL;
+
+    cairo_surface_t *surface = cairo_image_surface_create(
+        CAIRO_FORMAT_ARGB32, (int)viewport->width, (int)viewport->height);
+    if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
+        cairo_surface_destroy(surface);
+        return NULL;
+    }
+
+    uint8_t *data = cairo_image_surface_get_data(surface);
+    const int stride = cairo_image_surface_get_stride(surface);
+    for (uint32_t y = 0; y < viewport->height; ++y) {
+        uint32_t *row = (uint32_t *)(data + (size_t)y * stride);
+        for (uint32_t x = 0; x < viewport->width; ++x) {
+            const uint32_t source_x =
+                (uint32_t)(((uint64_t)x * source_width) / viewport->width);
+            const uint32_t source_y =
+                (uint32_t)(((uint64_t)y * source_height) / viewport->height);
+            const uint8_t canonical =
+                source_luminance(source_data, source_stride, source_x, source_y);
+            uint32_t coverage_argb = 0;
+            uint32_t stroke_argb = 0;
+            semantic_surface_pixel_at(
+                priv->stroke_coverage, viewport, x, y, &coverage_argb);
+            semantic_surface_pixel_at(priv->stroke, viewport, x, y, &stroke_argb);
+            row[x] = UINT32_C(0xff000000) | ((uint32_t)canonical << 16) |
+                     (((coverage_argb >> 24) & 0xff) << 8) |
+                     ((stroke_argb >> 24) & 0xff);
+        }
+    }
+    cairo_surface_mark_dirty(surface);
+    return surface;
+}
+
+static void dump_semantic_surfaces(const screen_sharp_memory_priv_t *priv,
+                                   const sharp_memory_viewport_t *viewport) {
+    dump_png_surface(priv->source,
+                     SHARP_MEMORY_SOURCE_DUMP_TEMP_PATH,
+                     SHARP_MEMORY_SOURCE_DUMP_PATH);
+    dump_png_surface(
+        priv->text, SHARP_MEMORY_TEXT_DUMP_TEMP_PATH, SHARP_MEMORY_TEXT_DUMP_PATH);
+    dump_png_surface(priv->stroke,
+                     SHARP_MEMORY_STROKE_DUMP_TEMP_PATH,
+                     SHARP_MEMORY_STROKE_DUMP_PATH);
+    dump_png_surface(priv->stroke_coverage,
+                     SHARP_MEMORY_COVERAGE_DUMP_TEMP_PATH,
+                     SHARP_MEMORY_COVERAGE_DUMP_PATH);
+
+    cairo_surface_t *composite = semantic_debug_composite(priv, viewport);
+    if (composite != NULL) {
+        dump_png_surface(composite,
+                         SHARP_MEMORY_SEMANTICS_DUMP_TEMP_PATH,
+                         SHARP_MEMORY_SEMANTICS_DUMP_PATH);
+        cairo_surface_destroy(composite);
+    }
+}
+
+static void dump_frame_if_requested(const screen_sharp_memory_priv_t *priv,
+                                    const sharp_memory_viewport_t *viewport) {
     if (access(SHARP_MEMORY_DUMP_TRIGGER, F_OK) != 0)
         return;
 
@@ -776,7 +932,14 @@ static void dump_frame_if_requested(const screen_sharp_memory_priv_t *priv) {
         return;
     }
 
-    fprintf(stderr, "screen:sharp-memory: captured %s\n", SHARP_MEMORY_DUMP_PATH);
+    dump_semantic_surfaces(priv, viewport);
+    const char *semantic_state = priv->semantics_valid == NULL
+                                     ? "untracked"
+                                     : (*priv->semantics_valid ? "valid" : "invalid");
+    fprintf(stderr,
+            "screen:sharp-memory: captured %s and semantic PNGs (semantics=%s)\n",
+            SHARP_MEMORY_DUMP_PATH,
+            semantic_state);
 }
 
 static void screen_sharp_memory_paint(matron_fb_t *fb) {
@@ -884,7 +1047,7 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
             }
         }
 
-        dump_frame_if_requested(priv);
+        dump_frame_if_requested(priv, &viewport);
         priv->frame_dirty = true;
     }
 

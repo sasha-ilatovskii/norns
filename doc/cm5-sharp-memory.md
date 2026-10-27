@@ -201,8 +201,21 @@ touch /tmp/dump-sharp-frame
 ```
 
 Cause a screen redraw, for example by turning an encoder. Matron consumes the
-trigger and writes `/tmp/sharp-frame.pbm`. It logs
-`screen:sharp-memory: captured /tmp/sharp-frame.pbm` when the file is complete.
+trigger and writes the exact output frame plus the renderer's diagnostic
+surfaces:
+
+- `/tmp/sharp-frame.pbm`: final 400x240 1-bit panel frame
+- `/tmp/sharp-source.png`: canonical 128x64 Cairo framebuffer
+- `/tmp/sharp-text.png`: hard-antialiased text mask
+- `/tmp/sharp-stroke.png`: physical-resolution stroke atlas
+- `/tmp/sharp-coverage.png`: logical stroke ownership mask
+- `/tmp/sharp-semantics.png`: channel composite at physical viewport size
+
+In `sharp-semantics.png`, red is canonical Cairo luminance, green is logical
+stroke ownership, and blue is the physical stroke atlas. A canonical stroke
+with no green pixels was not captured by the semantic path; green with no blue
+shows pixels reserved as background around an optimized outline. This makes it
+possible to distinguish mask-generation bugs from the final 1-bit compositor.
 The trigger is one-shot, so frame capture does not add continuous disk writes.
 
 PBM can be copied directly to another computer or converted to PNG on the CM5:
