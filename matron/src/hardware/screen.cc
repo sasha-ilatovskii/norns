@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vector>
 
 #include "args.h"
 #include "event_types.h"
@@ -77,6 +78,8 @@ static cairo_t *semantic_stroke_cr;
 static cairo_surface_t *semantic_stroke_coverage_surface;
 static cairo_t *semantic_stroke_coverage_cr;
 static bool semantic_surfaces_valid;
+static uint8_t semantic_stroke_level_current;
+static std::vector<uint8_t> semantic_stroke_level_stack;
 static bool surface_may_have_color = false;
 
 static cairo_font_face_t *ct[NUM_FONTS];
@@ -135,16 +138,10 @@ static void semantic_text_clear(void) {
 }
 
 static uint8_t semantic_stroke_level(void) {
-    double red = 0.0;
-    double green = 0.0;
-    double blue = 0.0;
-    double alpha = 0.0;
-    if (cairo_pattern_get_rgba(
-            cairo_get_source(semantic_stroke_cr), &red, &green, &blue, &alpha) !=
-        CAIRO_STATUS_SUCCESS)
-        return 15;
-    int level = (int)floor(red * 15.0 + 0.5);
-    return (uint8_t)(level < 0 ? 0 : (level > 15 ? 15 : level));
+    // Do not treat cairo_get_source() as semantic metadata: temporary source
+    // patterns and context state can make an RGBA query unreliable. Keep the
+    // exact screen.level value, including across screen.save()/restore().
+    return semantic_stroke_level_current;
 }
 
 static void semantic_stroke_append_and_stroke(const cairo_path_t *path,
@@ -338,6 +335,8 @@ void screen_init(void) {
     surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 128, 64);
     cr = cr_primary = cairo_create(surface);
     semantic_surfaces_valid = true;
+    semantic_stroke_level_current = 0;
+    semantic_stroke_level_stack.clear();
     if (semantic_surfaces_requested()) {
         semantic_text_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 128, 64);
         semantic_text_cr = cairo_create(semantic_text_surface);
@@ -591,6 +590,7 @@ void init_font_faces(void) {
 }
 
 void screen_deinit(void) {
+    semantic_stroke_level_stack.clear();
     if (semantic_stroke_coverage_cr != NULL) {
         cairo_destroy(semantic_stroke_coverage_cr);
         semantic_stroke_coverage_cr = NULL;
@@ -656,6 +656,7 @@ void screen_update(void) {
 void screen_save(void) {
     cairo_save(cr);
     if (semantic_text_active()) {
+        semantic_stroke_level_stack.push_back(semantic_stroke_level_current);
         cairo_save(semantic_text_cr);
         cairo_save(semantic_stroke_cr);
         cairo_save(semantic_stroke_coverage_cr);
@@ -668,6 +669,10 @@ void screen_restore(void) {
         cairo_restore(semantic_text_cr);
         cairo_restore(semantic_stroke_cr);
         cairo_restore(semantic_stroke_coverage_cr);
+        if (!semantic_stroke_level_stack.empty()) {
+            semantic_stroke_level_current = semantic_stroke_level_stack.back();
+            semantic_stroke_level_stack.pop_back();
+        }
     }
 }
 
@@ -762,6 +767,7 @@ void screen_level(int z) {
     z = z < 0 ? 0 : (z > 15 ? 15 : z);
     cairo_set_source_rgb(cr, c[z], c[z], c[z]);
     if (semantic_text_active()) {
+        semantic_stroke_level_current = (uint8_t)z;
         cairo_set_source_rgb(semantic_text_cr, c[z], c[z], c[z]);
         cairo_set_source_rgb(semantic_stroke_cr, c[z], c[z], c[z]);
         cairo_set_source_rgb(semantic_stroke_coverage_cr, c[z], c[z], c[z]);
