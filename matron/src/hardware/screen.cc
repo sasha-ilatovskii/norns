@@ -74,6 +74,8 @@ static cairo_surface_t *semantic_text_surface;
 static cairo_t *semantic_text_cr;
 static cairo_surface_t *semantic_stroke_surface;
 static cairo_t *semantic_stroke_cr;
+static cairo_surface_t *semantic_stroke_coverage_surface;
+static cairo_t *semantic_stroke_coverage_cr;
 static bool semantic_surfaces_valid;
 static bool surface_may_have_color = false;
 
@@ -85,7 +87,8 @@ static FT_Face face[NUM_FONTS];
 static void init_font_faces(void);
 
 static bool semantic_text_active(void) {
-    return cr == cr_primary && semantic_text_cr != NULL && semantic_stroke_cr != NULL;
+    return cr == cr_primary && semantic_text_cr != NULL && semantic_stroke_cr != NULL &&
+           semantic_stroke_coverage_cr != NULL;
 }
 
 static bool semantic_surfaces_requested(void) {
@@ -112,6 +115,12 @@ static void semantic_text_set_hard_antialias(void) {
     cairo_font_options_set_antialias(font_options, CAIRO_ANTIALIAS_NONE);
     cairo_set_font_options(semantic_stroke_cr, font_options);
     cairo_font_options_destroy(font_options);
+
+    font_options = cairo_font_options_create();
+    cairo_set_antialias(semantic_stroke_coverage_cr, CAIRO_ANTIALIAS_NONE);
+    cairo_font_options_set_antialias(font_options, CAIRO_ANTIALIAS_NONE);
+    cairo_set_font_options(semantic_stroke_coverage_cr, font_options);
+    cairo_font_options_destroy(font_options);
 }
 
 static void semantic_text_clear(void) {
@@ -124,6 +133,11 @@ static void semantic_text_clear(void) {
     cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_CLEAR);
     cairo_paint(semantic_stroke_cr);
     cairo_restore(semantic_stroke_cr);
+
+    cairo_save(semantic_stroke_coverage_cr);
+    cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(semantic_stroke_coverage_cr);
+    cairo_restore(semantic_stroke_coverage_cr);
 }
 
 static uint8_t semantic_stroke_level(void) {
@@ -191,6 +205,16 @@ static void semantic_stroke_draw(void) {
     sharp_memory_outline_render(
         semantic_stroke_cr, flat_path, semantic_stroke_surface, level, track_width_px);
 
+    // Claim the complete canonical stroke footprint independently of the
+    // sparse outline atlas. The backend uses this mask to force atlas gaps to
+    // the background instead of letting the original grayscale stroke dither
+    // through them.
+    cairo_save(semantic_stroke_coverage_cr);
+    cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_OVER);
+    cairo_set_source_rgba(semantic_stroke_coverage_cr, 1.0, 1.0, 1.0, 1.0);
+    cairo_stroke(semantic_stroke_coverage_cr);
+    cairo_restore(semantic_stroke_coverage_cr);
+
     cairo_new_path(semantic_stroke_cr);
     cairo_path_destroy(flat_path);
     cairo_path_destroy(path);
@@ -204,6 +228,14 @@ static void semantic_stroke_erase_path(bool stroke) {
     else
         cairo_fill(semantic_stroke_cr);
     cairo_restore(semantic_stroke_cr);
+
+    cairo_save(semantic_stroke_coverage_cr);
+    cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_CLEAR);
+    if (stroke)
+        cairo_stroke(semantic_stroke_coverage_cr);
+    else
+        cairo_fill(semantic_stroke_coverage_cr);
+    cairo_restore(semantic_stroke_coverage_cr);
 }
 
 static void semantic_show_text(const char *text) {
@@ -212,6 +244,10 @@ static void semantic_show_text(const char *text) {
     cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_CLEAR);
     cairo_show_text(semantic_stroke_cr, text);
     cairo_restore(semantic_stroke_cr);
+    cairo_save(semantic_stroke_coverage_cr);
+    cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_CLEAR);
+    cairo_show_text(semantic_stroke_coverage_cr, text);
+    cairo_restore(semantic_stroke_coverage_cr);
 
     // Font hinting can produce a slightly different advance at the stroke
     // layer's 3x CTM. Keep both sidecar current points locked to canonical
@@ -220,6 +256,7 @@ static void semantic_show_text(const char *text) {
     cairo_get_current_point(cr, &x, &y);
     cairo_move_to(semantic_text_cr, x, y);
     cairo_move_to(semantic_stroke_cr, x, y);
+    cairo_move_to(semantic_stroke_coverage_cr, x, y);
 }
 
 static void semantic_text_erase_path(bool stroke) {
@@ -244,6 +281,12 @@ static void semantic_text_erase_rectangle(double x, double y, double width, doub
     cairo_rectangle(semantic_stroke_cr, x, y, width, height);
     cairo_fill(semantic_stroke_cr);
     cairo_restore(semantic_stroke_cr);
+
+    cairo_save(semantic_stroke_coverage_cr);
+    cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_CLEAR);
+    cairo_rectangle(semantic_stroke_coverage_cr, x, y, width, height);
+    cairo_fill(semantic_stroke_coverage_cr);
+    cairo_restore(semantic_stroke_coverage_cr);
 }
 
 static void semantic_text_erase_raw_rectangle(double x, double y, double width, double height) {
@@ -272,6 +315,21 @@ static void semantic_text_erase_raw_rectangle(double x, double y, double width, 
     cairo_restore(semantic_stroke_cr);
     cairo_append_path(semantic_stroke_cr, path);
     cairo_path_destroy(path);
+
+    path = cairo_copy_path(semantic_stroke_coverage_cr);
+    cairo_new_path(semantic_stroke_coverage_cr);
+    cairo_save(semantic_stroke_coverage_cr);
+    cairo_identity_matrix(semantic_stroke_coverage_cr);
+    cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_CLEAR);
+    cairo_rectangle(semantic_stroke_coverage_cr,
+                    x * SEMANTIC_STROKE_SCALE,
+                    y * SEMANTIC_STROKE_SCALE,
+                    width * SEMANTIC_STROKE_SCALE,
+                    height * SEMANTIC_STROKE_SCALE);
+    cairo_fill(semantic_stroke_coverage_cr);
+    cairo_restore(semantic_stroke_coverage_cr);
+    cairo_append_path(semantic_stroke_coverage_cr, path);
+    cairo_path_destroy(path);
 }
 
 //---------------------------------------
@@ -287,11 +345,17 @@ void screen_init(void) {
         semantic_stroke_surface = cairo_image_surface_create(
             CAIRO_FORMAT_ARGB32, 128 * SEMANTIC_STROKE_SCALE, 64 * SEMANTIC_STROKE_SCALE);
         semantic_stroke_cr = cairo_create(semantic_stroke_surface);
+        semantic_stroke_coverage_surface = cairo_image_surface_create(
+            CAIRO_FORMAT_ARGB32, 128 * SEMANTIC_STROKE_SCALE, 64 * SEMANTIC_STROKE_SCALE);
+        semantic_stroke_coverage_cr = cairo_create(semantic_stroke_coverage_surface);
         // Logical integer coordinates land on physical pixel centers. Without
         // this offset a nominal one-pixel axis-aligned stroke can straddle two
         // Sharp pixels when antialiasing is disabled.
         cairo_translate(semantic_stroke_cr, 0.5, 0.5);
         cairo_scale(semantic_stroke_cr, SEMANTIC_STROKE_SCALE, SEMANTIC_STROKE_SCALE);
+        cairo_translate(semantic_stroke_coverage_cr, 0.5, 0.5);
+        cairo_scale(
+            semantic_stroke_coverage_cr, SEMANTIC_STROKE_SCALE, SEMANTIC_STROKE_SCALE);
         semantic_text_clear();
         semantic_text_set_hard_antialias();
     }
@@ -326,6 +390,7 @@ void screen_text_right(const char *s) {
     if (semantic_text_active()) {
         cairo_rel_move_to(semantic_text_cr, -extents.width, 0);
         cairo_rel_move_to(semantic_stroke_cr, -extents.width, 0);
+        cairo_rel_move_to(semantic_stroke_coverage_cr, -extents.width, 0);
     }
     cairo_show_text(cr, s);
     if (semantic_text_active())
@@ -346,6 +411,7 @@ void screen_text_center(const char *s) {
     if (semantic_text_active()) {
         cairo_move_to(semantic_text_cr, x, y);
         cairo_move_to(semantic_stroke_cr, x, y);
+        cairo_move_to(semantic_stroke_coverage_cr, x, y);
     }
     cairo_show_text(cr, s);
     if (semantic_text_active())
@@ -499,11 +565,14 @@ void init_font_faces(void) {
     // default font
     cairo_set_font_face(cr, ct[0]);
     cairo_set_font_size(cr, 8.0);
-    if (semantic_text_cr != NULL && semantic_stroke_cr != NULL) {
+    if (semantic_text_cr != NULL && semantic_stroke_cr != NULL &&
+        semantic_stroke_coverage_cr != NULL) {
         cairo_set_font_face(semantic_text_cr, ct[0]);
         cairo_set_font_size(semantic_text_cr, 8.0);
         cairo_set_font_face(semantic_stroke_cr, ct[0]);
         cairo_set_font_size(semantic_stroke_cr, 8.0);
+        cairo_set_font_face(semantic_stroke_coverage_cr, ct[0]);
+        cairo_set_font_size(semantic_stroke_coverage_cr, 8.0);
         semantic_text_set_hard_antialias();
     }
 
@@ -519,6 +588,7 @@ void init_font_faces(void) {
             screen_semantics_t semantics;
             semantics.text = semantic_text_surface;
             semantics.stroke = semantic_stroke_surface;
+            semantics.stroke_coverage = semantic_stroke_coverage_surface;
             semantics.valid = &semantic_surfaces_valid;
             fb_ops->bind_semantics(fb, &semantics);
         }
@@ -526,6 +596,14 @@ void init_font_faces(void) {
 }
 
 void screen_deinit(void) {
+    if (semantic_stroke_coverage_cr != NULL) {
+        cairo_destroy(semantic_stroke_coverage_cr);
+        semantic_stroke_coverage_cr = NULL;
+    }
+    if (semantic_stroke_coverage_surface != NULL) {
+        cairo_surface_destroy(semantic_stroke_coverage_surface);
+        semantic_stroke_coverage_surface = NULL;
+    }
     if (semantic_stroke_cr != NULL) {
         cairo_destroy(semantic_stroke_cr);
         semantic_stroke_cr = NULL;
@@ -585,6 +663,7 @@ void screen_save(void) {
     if (semantic_text_active()) {
         cairo_save(semantic_text_cr);
         cairo_save(semantic_stroke_cr);
+        cairo_save(semantic_stroke_coverage_cr);
     }
 }
 
@@ -593,6 +672,7 @@ void screen_restore(void) {
     if (semantic_text_active()) {
         cairo_restore(semantic_text_cr);
         cairo_restore(semantic_stroke_cr);
+        cairo_restore(semantic_stroke_coverage_cr);
     }
 }
 
@@ -602,6 +682,7 @@ void screen_font_face(int i) {
         if (semantic_text_active()) {
             cairo_set_font_face(semantic_text_cr, ct[i]);
             cairo_set_font_face(semantic_stroke_cr, ct[i]);
+            cairo_set_font_face(semantic_stroke_coverage_cr, ct[i]);
         }
     }
 }
@@ -611,6 +692,7 @@ void screen_font_size(double z) {
     if (semantic_text_active()) {
         cairo_set_font_size(semantic_text_cr, z);
         cairo_set_font_size(semantic_stroke_cr, z);
+        cairo_set_font_size(semantic_stroke_coverage_cr, z);
     }
 }
 
@@ -684,6 +766,7 @@ void screen_level(int z) {
     if (semantic_text_active()) {
         cairo_set_source_rgb(semantic_text_cr, c[z], c[z], c[z]);
         cairo_set_source_rgb(semantic_stroke_cr, c[z], c[z], c[z]);
+        cairo_set_source_rgb(semantic_stroke_coverage_cr, c[z], c[z], c[z]);
     }
 }
 
@@ -692,6 +775,7 @@ void screen_line_width(double w) {
     if (semantic_text_active()) {
         cairo_set_line_width(semantic_text_cr, w);
         cairo_set_line_width(semantic_stroke_cr, w);
+        cairo_set_line_width(semantic_stroke_coverage_cr, w);
     }
 }
 
@@ -701,18 +785,21 @@ void screen_line_cap(const char *style) {
         if (semantic_text_active()) {
             cairo_set_line_cap(semantic_text_cr, CAIRO_LINE_CAP_ROUND);
             cairo_set_line_cap(semantic_stroke_cr, CAIRO_LINE_CAP_ROUND);
+            cairo_set_line_cap(semantic_stroke_coverage_cr, CAIRO_LINE_CAP_ROUND);
         }
     } else if (strcmp(style, "square") == 0) {
         cairo_set_line_cap(cr, CAIRO_LINE_CAP_SQUARE);
         if (semantic_text_active()) {
             cairo_set_line_cap(semantic_text_cr, CAIRO_LINE_CAP_SQUARE);
             cairo_set_line_cap(semantic_stroke_cr, CAIRO_LINE_CAP_SQUARE);
+            cairo_set_line_cap(semantic_stroke_coverage_cr, CAIRO_LINE_CAP_SQUARE);
         }
     } else {
         cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
         if (semantic_text_active()) {
             cairo_set_line_cap(semantic_text_cr, CAIRO_LINE_CAP_BUTT);
             cairo_set_line_cap(semantic_stroke_cr, CAIRO_LINE_CAP_BUTT);
+            cairo_set_line_cap(semantic_stroke_coverage_cr, CAIRO_LINE_CAP_BUTT);
         }
     }
 }
@@ -723,18 +810,21 @@ void screen_line_join(const char *style) {
         if (semantic_text_active()) {
             cairo_set_line_join(semantic_text_cr, CAIRO_LINE_JOIN_ROUND);
             cairo_set_line_join(semantic_stroke_cr, CAIRO_LINE_JOIN_ROUND);
+            cairo_set_line_join(semantic_stroke_coverage_cr, CAIRO_LINE_JOIN_ROUND);
         }
     } else if (strcmp(style, "bevel") == 0) {
         cairo_set_line_join(cr, CAIRO_LINE_JOIN_BEVEL);
         if (semantic_text_active()) {
             cairo_set_line_join(semantic_text_cr, CAIRO_LINE_JOIN_BEVEL);
             cairo_set_line_join(semantic_stroke_cr, CAIRO_LINE_JOIN_BEVEL);
+            cairo_set_line_join(semantic_stroke_coverage_cr, CAIRO_LINE_JOIN_BEVEL);
         }
     } else {
         cairo_set_line_join(cr, CAIRO_LINE_JOIN_MITER);
         if (semantic_text_active()) {
             cairo_set_line_join(semantic_text_cr, CAIRO_LINE_JOIN_MITER);
             cairo_set_line_join(semantic_stroke_cr, CAIRO_LINE_JOIN_MITER);
+            cairo_set_line_join(semantic_stroke_coverage_cr, CAIRO_LINE_JOIN_MITER);
         }
     }
 }
@@ -744,6 +834,7 @@ void screen_miter_limit(double limit) {
     if (semantic_text_active()) {
         cairo_set_miter_limit(semantic_text_cr, limit);
         cairo_set_miter_limit(semantic_stroke_cr, limit);
+        cairo_set_miter_limit(semantic_stroke_coverage_cr, limit);
     }
 }
 
@@ -752,6 +843,7 @@ void screen_move(double x, double y) {
     if (semantic_text_active()) {
         cairo_move_to(semantic_text_cr, x, y);
         cairo_move_to(semantic_stroke_cr, x, y);
+        cairo_move_to(semantic_stroke_coverage_cr, x, y);
     }
 }
 
@@ -760,6 +852,7 @@ void screen_line(double x, double y) {
     if (semantic_text_active()) {
         cairo_line_to(semantic_text_cr, x, y);
         cairo_line_to(semantic_stroke_cr, x, y);
+        cairo_line_to(semantic_stroke_coverage_cr, x, y);
     }
 }
 
@@ -768,6 +861,7 @@ void screen_line_rel(double x, double y) {
     if (semantic_text_active()) {
         cairo_rel_line_to(semantic_text_cr, x, y);
         cairo_rel_line_to(semantic_stroke_cr, x, y);
+        cairo_rel_line_to(semantic_stroke_coverage_cr, x, y);
     }
 }
 
@@ -776,6 +870,7 @@ void screen_move_rel(double x, double y) {
     if (semantic_text_active()) {
         cairo_rel_move_to(semantic_text_cr, x, y);
         cairo_rel_move_to(semantic_stroke_cr, x, y);
+        cairo_rel_move_to(semantic_stroke_coverage_cr, x, y);
     }
 }
 
@@ -784,6 +879,7 @@ void screen_curve(double x1, double y1, double x2, double y2, double x3, double 
     if (semantic_text_active()) {
         cairo_curve_to(semantic_text_cr, x1, y1, x2, y2, x3, y3);
         cairo_curve_to(semantic_stroke_cr, x1, y1, x2, y2, x3, y3);
+        cairo_curve_to(semantic_stroke_coverage_cr, x1, y1, x2, y2, x3, y3);
     }
 }
 
@@ -792,6 +888,8 @@ void screen_curve_rel(double dx1, double dy1, double dx2, double dy2, double dx3
     if (semantic_text_active()) {
         cairo_rel_curve_to(semantic_text_cr, dx1, dy1, dx2, dy2, dx3, dy3);
         cairo_rel_curve_to(semantic_stroke_cr, dx1, dy1, dx2, dy2, dx3, dy3);
+        cairo_rel_curve_to(
+            semantic_stroke_coverage_cr, dx1, dy1, dx2, dy2, dx3, dy3);
     }
 }
 
@@ -800,6 +898,7 @@ void screen_arc(double x, double y, double r, double a1, double a2) {
     if (semantic_text_active()) {
         cairo_arc(semantic_text_cr, x, y, r, a1, a2);
         cairo_arc(semantic_stroke_cr, x, y, r, a1, a2);
+        cairo_arc(semantic_stroke_coverage_cr, x, y, r, a1, a2);
     }
 }
 
@@ -808,6 +907,7 @@ void screen_rect(double x, double y, double w, double h) {
     if (semantic_text_active()) {
         cairo_rectangle(semantic_text_cr, x, y, w, h);
         cairo_rectangle(semantic_stroke_cr, x, y, w, h);
+        cairo_rectangle(semantic_stroke_coverage_cr, x, y, w, h);
     }
 }
 
@@ -816,6 +916,7 @@ void screen_close_path(void) {
     if (semantic_text_active()) {
         cairo_close_path(semantic_text_cr);
         cairo_close_path(semantic_stroke_cr);
+        cairo_close_path(semantic_stroke_coverage_cr);
     }
 }
 
@@ -849,6 +950,7 @@ void screen_clear(void) {
         semantic_text_clear();
         cairo_set_operator(semantic_text_cr, CAIRO_OPERATOR_OVER);
         cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_OVER);
+        cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_OVER);
         semantic_surfaces_valid = true;
     }
     surface_may_have_color = false;
@@ -989,6 +1091,7 @@ void screen_rotate(double r) {
     if (semantic_text_active()) {
         cairo_rotate(semantic_text_cr, r);
         cairo_rotate(semantic_stroke_cr, r);
+        cairo_rotate(semantic_stroke_coverage_cr, r);
     }
 }
 
@@ -997,6 +1100,7 @@ void screen_translate(double x, double y) {
     if (semantic_text_active()) {
         cairo_translate(semantic_text_cr, x, y);
         cairo_translate(semantic_stroke_cr, x, y);
+        cairo_translate(semantic_stroke_coverage_cr, x, y);
     }
 }
 
@@ -1006,6 +1110,7 @@ void screen_set_operator(int i) {
         if (semantic_text_active()) {
             cairo_set_operator(semantic_text_cr, ops[i]);
             cairo_set_operator(semantic_stroke_cr, ops[i]);
+            cairo_set_operator(semantic_stroke_coverage_cr, ops[i]);
             if (i != 0 && i != 15)
                 semantic_surfaces_valid = false;
         }

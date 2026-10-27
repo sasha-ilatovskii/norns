@@ -48,6 +48,7 @@ typedef struct _screen_sharp_memory_priv {
     cairo_surface_t *source;
     cairo_surface_t *text;
     cairo_surface_t *stroke;
+    cairo_surface_t *stroke_coverage;
     const bool *semantics_valid;
     int fps;
     uint32_t speed_hz;
@@ -586,6 +587,10 @@ static void screen_sharp_memory_destroy(matron_io_t *io) {
         cairo_surface_destroy(priv->stroke);
         priv->stroke = NULL;
     }
+    if (priv->stroke_coverage != NULL) {
+        cairo_surface_destroy(priv->stroke_coverage);
+        priv->stroke_coverage = NULL;
+    }
     if (priv->frame != NULL) {
         pthread_mutex_lock(&priv->paint_lock);
         send_command(priv, SHARP_MEMORY_CLEAR_COMMAND);
@@ -677,15 +682,15 @@ static bool semantic_text_shadow_at(const screen_sharp_memory_priv_t *priv,
     return false;
 }
 
-static bool semantic_stroke_at(const screen_sharp_memory_priv_t *priv,
-                               const sharp_memory_viewport_t *viewport,
-                               uint32_t viewport_x,
-                               uint32_t viewport_y) {
-    if (priv->stroke == NULL)
+static bool semantic_stroke_mask_at(cairo_surface_t *surface,
+                                    const sharp_memory_viewport_t *viewport,
+                                    uint32_t viewport_x,
+                                    uint32_t viewport_y) {
+    if (surface == NULL)
         return false;
 
-    const uint32_t stroke_width = (uint32_t)cairo_image_surface_get_width(priv->stroke);
-    const uint32_t stroke_height = (uint32_t)cairo_image_surface_get_height(priv->stroke);
+    const uint32_t stroke_width = (uint32_t)cairo_image_surface_get_width(surface);
+    const uint32_t stroke_height = (uint32_t)cairo_image_surface_get_height(surface);
     if (stroke_width == 0 || stroke_height == 0)
         return false;
 
@@ -693,8 +698,8 @@ static bool semantic_stroke_at(const screen_sharp_memory_priv_t *priv,
         (uint32_t)(((uint64_t)viewport_x * stroke_width) / viewport->width);
     const uint32_t stroke_y =
         (uint32_t)(((uint64_t)viewport_y * stroke_height) / viewport->height);
-    const int stroke_stride = cairo_image_surface_get_stride(priv->stroke);
-    const uint8_t *stroke_data = cairo_image_surface_get_data(priv->stroke);
+    const int stroke_stride = cairo_image_surface_get_stride(surface);
+    const uint8_t *stroke_data = cairo_image_surface_get_data(surface);
     if (stroke_data == NULL)
         return false;
 
@@ -784,6 +789,8 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
         cairo_surface_flush(priv->text);
     if (priv->stroke != NULL)
         cairo_surface_flush(priv->stroke);
+    if (priv->stroke_coverage != NULL)
+        cairo_surface_flush(priv->stroke_coverage);
 
     const uint32_t source_width = (uint32_t)cairo_image_surface_get_width(priv->source);
     const uint32_t source_height = (uint32_t)cairo_image_surface_get_height(priv->source);
@@ -837,9 +844,17 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
                                 viewport_y,
                                 priv->tile_density_boost,
                                 priv->invert);
-                        } else if (use_semantics && semantic_stroke_at(
-                                       priv, &viewport, viewport_x, viewport_y)) {
+                        } else if (use_semantics && semantic_stroke_mask_at(
+                                       priv->stroke, &viewport, viewport_x, viewport_y)) {
                             white = !priv->invert;
+                        } else if (use_semantics && semantic_stroke_mask_at(
+                                       priv->stroke_coverage,
+                                       &viewport,
+                                       viewport_x,
+                                       viewport_y)) {
+                            // This pixel belongs to a semantic stroke, but the
+                            // outline atlas intentionally left it empty.
+                            white = priv->invert;
                         } else if (use_semantics && semantic_text_shadow_at(
                                        priv, &viewport, viewport_x, viewport_y)) {
                             // Solid maximum-level ink: white in the logical
@@ -883,11 +898,16 @@ static void screen_sharp_memory_bind_semantics(matron_fb_t *fb,
         cairo_surface_destroy(priv->text);
     if (priv->stroke != NULL)
         cairo_surface_destroy(priv->stroke);
+    if (priv->stroke_coverage != NULL)
+        cairo_surface_destroy(priv->stroke_coverage);
     priv->text = semantics != NULL && semantics->text != NULL
                      ? cairo_surface_reference(semantics->text)
                      : NULL;
     priv->stroke = semantics != NULL && semantics->stroke != NULL
                        ? cairo_surface_reference(semantics->stroke)
                        : NULL;
+    priv->stroke_coverage = semantics != NULL && semantics->stroke_coverage != NULL
+                                ? cairo_surface_reference(semantics->stroke_coverage)
+                                : NULL;
     priv->semantics_valid = semantics != NULL ? semantics->valid : NULL;
 }

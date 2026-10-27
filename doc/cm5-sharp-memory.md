@@ -161,6 +161,10 @@ paths. The procedural outline atlas consists of upper, center, and lower tracks
 offset along the local path normal. At the default `screen.line_width(1)`, each
 track is one physical Sharp pixel wide, making a fully lit level-15 stroke
 three pixels wide. Larger API line widths scale the three tracks together.
+The renderer also keeps a separate mask for the complete original stroke
+footprint. Pixels inside that footprint which are absent from the atlas are
+forced to the background, so the grayscale Cairo stroke cannot leak through
+the intended gaps as a second layer of 3x3 dithering.
 
 Levels 1 through 4 draw only the center track with `16/1`, `24/1`, `40/1`,
 and `64/1` dash/space periods. Level 5 makes the center track solid. Levels 6

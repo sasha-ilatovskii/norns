@@ -53,6 +53,10 @@ typedef struct _screen_semantics {
     // Transparent ARGB32 surface containing the already-styled physical
     // stroke mask. The backend maps it to the output viewport as-is.
     cairo_surface_t *stroke;
+    // Transparent ARGB32 mask covering the canonical stroke footprint at
+    // physical resolution. It owns both the lit atlas pixels and its gaps so
+    // the framebuffer stroke cannot leak through the procedural pattern.
+    cairo_surface_t *stroke_coverage;
     // False asks a backend to fall back to the canonical framebuffer for a
     // frame containing blend operations the semantic layers cannot reproduce.
     const bool *valid;
