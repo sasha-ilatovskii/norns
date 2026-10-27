@@ -243,7 +243,12 @@ void sharp_memory_outline_render(cairo_t *path_context,
     cairo_t *context = cairo_create(target);
     cairo_set_antialias(context, CAIRO_ANTIALIAS_NONE);
     cairo_set_operator(context, CAIRO_OPERATOR_OVER);
-    cairo_set_source_rgba(context, 1.0, 1.0, 1.0, 1.0);
+    // Alpha is the mask consumed by the Sharp backend. Preserve the source
+    // norns level in RGB as diagnostic metadata so sharp-stroke.png exposes
+    // path/level leaks without changing the rendered display.
+    const double encoded_level = static_cast<double>(level) / 15.0;
+    cairo_set_source_rgba(
+        context, encoded_level, encoded_level, encoded_level, 1.0);
     cairo_set_line_width(context, track_width_px);
     cairo_set_line_cap(context, cairo_get_line_cap(path_context));
     cairo_set_line_join(context, cairo_get_line_join(path_context));

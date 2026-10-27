@@ -155,6 +155,17 @@ static uint8_t semantic_stroke_level(void) {
     return semantic_stroke_level_current;
 }
 
+static void semantic_replace_path(cairo_t *context, const cairo_path_t *path) {
+    cairo_new_path(context);
+    cairo_append_path(context, path);
+}
+
+static void semantic_replace_paths(const cairo_path_t *path) {
+    semantic_replace_path(semantic_text_cr, path);
+    semantic_replace_path(semantic_stroke_cr, path);
+    semantic_replace_path(semantic_stroke_coverage_cr, path);
+}
+
 static void semantic_stroke_append_and_stroke(const cairo_path_t *path,
                                               double width,
                                               double dash,
@@ -937,19 +948,33 @@ void screen_close_path(void) {
 void screen_stroke(void) {
     const bool draw_semantic_stroke = semantic_text_active();
     const uint8_t semantic_level = draw_semantic_stroke ? semantic_stroke_level() : 0;
+    cairo_path_t *primary_path = draw_semantic_stroke ? cairo_copy_path(cr) : NULL;
     cairo_stroke(cr);
     if (draw_semantic_stroke) {
+        // The primary Cairo context is authoritative. Rebuild all sidecar
+        // paths from it at the consuming operation so an earlier fill/stroke
+        // can never leak retained geometry into a later semantic stroke.
+        if (primary_path != NULL && primary_path->status == CAIRO_STATUS_SUCCESS)
+            semantic_replace_paths(primary_path);
         semantic_text_erase_path(true);
         semantic_stroke_draw(semantic_level);
     }
+    if (primary_path != NULL)
+        cairo_path_destroy(primary_path);
 }
 
 void screen_fill(void) {
+    const bool erase_semantics = semantic_text_active();
+    cairo_path_t *primary_path = erase_semantics ? cairo_copy_path(cr) : NULL;
     cairo_fill(cr);
-    if (semantic_text_active()) {
+    if (erase_semantics) {
+        if (primary_path != NULL && primary_path->status == CAIRO_STATUS_SUCCESS)
+            semantic_replace_paths(primary_path);
         semantic_text_erase_path(false);
         semantic_stroke_erase_path(false);
     }
+    if (primary_path != NULL)
+        cairo_path_destroy(primary_path);
 }
 
 void screen_text(const char *s) {

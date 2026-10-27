@@ -87,6 +87,39 @@ TEST_CASE("short step indicators retain distinct low brightness levels") {
     cairo_surface_destroy(path_surface);
 }
 
+TEST_CASE("outline atlas keeps level metadata in RGB and opacity in alpha") {
+    cairo_surface_t *path_surface =
+        cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 32, 12);
+    cairo_t *path_context = cairo_create(path_surface);
+    cairo_move_to(path_context, 8.5, 5.5);
+    cairo_line_to(path_context, 20.5, 5.5);
+    cairo_path_t *flat_path = cairo_copy_path_flat(path_context);
+
+    cairo_surface_t *target = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 32, 12);
+    sharp_memory_outline_render(path_context, flat_path, target, 6, 1.0);
+    cairo_surface_flush(target);
+
+    const uint32_t *pixels =
+        reinterpret_cast<const uint32_t *>(cairo_image_surface_get_data(target));
+    const int stride = cairo_image_surface_get_stride(target) / sizeof(uint32_t);
+    uint32_t ink = 0;
+    for (int y = 0; y < 12 && ink == 0; ++y) {
+        for (int x = 0; x < 32; ++x) {
+            if ((pixels[y * stride + x] >> 24) != 0) {
+                ink = pixels[y * stride + x];
+                break;
+            }
+        }
+    }
+    CHECK((ink >> 24) == 0xff);
+    CHECK((ink & 0x00ffffff) == 0x00666666);
+
+    cairo_surface_destroy(target);
+    cairo_path_destroy(flat_path);
+    cairo_destroy(path_context);
+    cairo_surface_destroy(path_surface);
+}
+
 TEST_CASE("outline atlas brightness has strictly increasing mean coverage") {
     double previous = -1.0;
     for (uint8_t level = 0; level < 16; ++level) {
