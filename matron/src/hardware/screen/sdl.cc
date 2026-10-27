@@ -43,6 +43,7 @@ screen_ops_t screen_sdl_ops = {
     },
     screen_sdl_paint, // .paint
     screen_sdl_bind,  // .bind
+    NULL,             // .bind_semantics
 };
 
 int screen_sdl_config(matron_io_t *io, lua_State *l) {

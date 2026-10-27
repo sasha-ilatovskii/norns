@@ -17,6 +17,7 @@ def build(bld):
         '../matron/src/hardware/io.cc',
         '../matron/src/hardware/platform.cc',
         '../matron/src/hardware/screen.cc',
+        '../matron/src/hardware/screen/sharp_memory_outline_atlas.cc',
         '../matron/src/hardware/stat.cc',
         '../matron/src/hardware/input/gpio.cc',
         '../matron/src/args.cc',

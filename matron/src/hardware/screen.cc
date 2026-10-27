@@ -8,7 +8,6 @@
 #include <cairo-ft.h>
 #include <cairo.h>
 #include <fcntl.h>
-#include <linux/fb.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -21,12 +20,14 @@
 #include "events.h"
 #include "hardware/io.h"
 #include "hardware/screen.h"
+#include "hardware/screen/sharp_memory_outline_atlas.h"
 #include "hardware/screen/ssd1322.h"
 #include "screen.h"
 #include "screen_results.h"
 
 #define NUM_FONTS 69
 #define NUM_OPS 29
+#define SEMANTIC_STROKE_SCALE 3
 
 static char font_path[NUM_FONTS][32];
 
@@ -69,6 +70,11 @@ static cairo_surface_t *surface;
 static cairo_surface_t *image;
 static cairo_t *cr;
 static cairo_t *cr_primary;
+static cairo_surface_t *semantic_text_surface;
+static cairo_t *semantic_text_cr;
+static cairo_surface_t *semantic_stroke_surface;
+static cairo_t *semantic_stroke_cr;
+static bool semantic_surfaces_valid;
 static bool surface_may_have_color = false;
 
 static cairo_font_face_t *ct[NUM_FONTS];
@@ -78,12 +84,217 @@ static FT_Face face[NUM_FONTS];
 
 static void init_font_faces(void);
 
+static bool semantic_text_active(void) {
+    return cr == cr_primary && semantic_text_cr != NULL && semantic_stroke_cr != NULL;
+}
+
+static bool semantic_surfaces_requested(void) {
+    matron_io_t *io;
+    TAILQ_FOREACH(io, &io_queue, entries) {
+        if (io->ops->type != IO_SCREEN)
+            continue;
+        screen_ops_t *screen_ops = (screen_ops_t *)io->ops;
+        if (screen_ops->bind_semantics != NULL)
+            return true;
+    }
+    return false;
+}
+
+static void semantic_text_set_hard_antialias(void) {
+    cairo_font_options_t *font_options = cairo_font_options_create();
+    cairo_set_antialias(semantic_text_cr, CAIRO_ANTIALIAS_NONE);
+    cairo_font_options_set_antialias(font_options, CAIRO_ANTIALIAS_NONE);
+    cairo_set_font_options(semantic_text_cr, font_options);
+    cairo_font_options_destroy(font_options);
+
+    font_options = cairo_font_options_create();
+    cairo_set_antialias(semantic_stroke_cr, CAIRO_ANTIALIAS_NONE);
+    cairo_font_options_set_antialias(font_options, CAIRO_ANTIALIAS_NONE);
+    cairo_set_font_options(semantic_stroke_cr, font_options);
+    cairo_font_options_destroy(font_options);
+}
+
+static void semantic_text_clear(void) {
+    cairo_save(semantic_text_cr);
+    cairo_set_operator(semantic_text_cr, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(semantic_text_cr);
+    cairo_restore(semantic_text_cr);
+
+    cairo_save(semantic_stroke_cr);
+    cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(semantic_stroke_cr);
+    cairo_restore(semantic_stroke_cr);
+}
+
+static uint8_t semantic_stroke_level(void) {
+    double red = 0.0;
+    double green = 0.0;
+    double blue = 0.0;
+    double alpha = 0.0;
+    if (cairo_pattern_get_rgba(
+            cairo_get_source(semantic_stroke_cr), &red, &green, &blue, &alpha) !=
+        CAIRO_STATUS_SUCCESS)
+        return 15;
+    int level = (int)floor(red * 15.0 + 0.5);
+    return (uint8_t)(level < 0 ? 0 : (level > 15 ? 15 : level));
+}
+
+static void semantic_stroke_append_and_stroke(const cairo_path_t *path,
+                                              double width,
+                                              double dash,
+                                              double gap,
+                                              cairo_operator_t op) {
+    cairo_new_path(semantic_stroke_cr);
+    cairo_append_path(semantic_stroke_cr, path);
+    cairo_set_operator(semantic_stroke_cr, op);
+    cairo_set_line_width(semantic_stroke_cr, width / SEMANTIC_STROKE_SCALE);
+    if (dash > 0.0) {
+        const double dashes[2] = {
+            dash / SEMANTIC_STROKE_SCALE,
+            gap / SEMANTIC_STROKE_SCALE,
+        };
+        cairo_set_dash(semantic_stroke_cr, dashes, 2, 0.0);
+    } else {
+        cairo_set_dash(semantic_stroke_cr, NULL, 0, 0.0);
+    }
+    cairo_stroke(semantic_stroke_cr);
+}
+
+static void semantic_stroke_draw(void) {
+    cairo_path_t *path = cairo_copy_path(semantic_stroke_cr);
+    cairo_path_t *flat_path = cairo_copy_path_flat(semantic_stroke_cr);
+    const double api_width = cairo_get_line_width(semantic_stroke_cr);
+    const uint8_t level = semantic_stroke_level();
+
+    // The semantic context has a permanent 3x base transform. Remove that
+    // scale when translating screen.line_width into a physical track width;
+    // any additional user transform remains represented in the result.
+    double horizontal_x = api_width;
+    double horizontal_y = 0.0;
+    double vertical_x = 0.0;
+    double vertical_y = api_width;
+    cairo_user_to_device_distance(semantic_stroke_cr, &horizontal_x, &horizontal_y);
+    cairo_user_to_device_distance(semantic_stroke_cr, &vertical_x, &vertical_y);
+    const double track_width_px =
+        (hypot(horizontal_x, horizontal_y) + hypot(vertical_x, vertical_y)) /
+        (2.0 * SEMANTIC_STROKE_SCALE);
+
+    cairo_save(semantic_stroke_cr);
+    cairo_set_source_rgba(semantic_stroke_cr, 1.0, 1.0, 1.0, 1.0);
+
+    // Remove an older semantic stroke wherever the canonical Cairo stroke is
+    // painting. The new brightness-specific layers are then built back up.
+    semantic_stroke_append_and_stroke(
+        path, api_width * SEMANTIC_STROKE_SCALE, 0.0, 0.0, CAIRO_OPERATOR_CLEAR);
+    cairo_restore(semantic_stroke_cr);
+
+    sharp_memory_outline_render(
+        semantic_stroke_cr, flat_path, semantic_stroke_surface, level, track_width_px);
+
+    cairo_new_path(semantic_stroke_cr);
+    cairo_path_destroy(flat_path);
+    cairo_path_destroy(path);
+}
+
+static void semantic_stroke_erase_path(bool stroke) {
+    cairo_save(semantic_stroke_cr);
+    cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_CLEAR);
+    if (stroke)
+        cairo_stroke(semantic_stroke_cr);
+    else
+        cairo_fill(semantic_stroke_cr);
+    cairo_restore(semantic_stroke_cr);
+}
+
+static void semantic_show_text(const char *text) {
+    cairo_show_text(semantic_text_cr, text);
+    cairo_save(semantic_stroke_cr);
+    cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_CLEAR);
+    cairo_show_text(semantic_stroke_cr, text);
+    cairo_restore(semantic_stroke_cr);
+
+    // Font hinting can produce a slightly different advance at the stroke
+    // layer's 3x CTM. Keep both sidecar current points locked to canonical
+    // Cairo so later relative drawing commands cannot accumulate drift.
+    double x, y;
+    cairo_get_current_point(cr, &x, &y);
+    cairo_move_to(semantic_text_cr, x, y);
+    cairo_move_to(semantic_stroke_cr, x, y);
+}
+
+static void semantic_text_erase_path(bool stroke) {
+    cairo_save(semantic_text_cr);
+    cairo_set_operator(semantic_text_cr, CAIRO_OPERATOR_CLEAR);
+    if (stroke)
+        cairo_stroke(semantic_text_cr);
+    else
+        cairo_fill(semantic_text_cr);
+    cairo_restore(semantic_text_cr);
+}
+
+static void semantic_text_erase_rectangle(double x, double y, double width, double height) {
+    cairo_save(semantic_text_cr);
+    cairo_set_operator(semantic_text_cr, CAIRO_OPERATOR_CLEAR);
+    cairo_rectangle(semantic_text_cr, x, y, width, height);
+    cairo_fill(semantic_text_cr);
+    cairo_restore(semantic_text_cr);
+
+    cairo_save(semantic_stroke_cr);
+    cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_CLEAR);
+    cairo_rectangle(semantic_stroke_cr, x, y, width, height);
+    cairo_fill(semantic_stroke_cr);
+    cairo_restore(semantic_stroke_cr);
+}
+
+static void semantic_text_erase_raw_rectangle(double x, double y, double width, double height) {
+    cairo_path_t *path = cairo_copy_path(semantic_text_cr);
+    cairo_new_path(semantic_text_cr);
+    cairo_save(semantic_text_cr);
+    cairo_identity_matrix(semantic_text_cr);
+    cairo_set_operator(semantic_text_cr, CAIRO_OPERATOR_CLEAR);
+    cairo_rectangle(semantic_text_cr, x, y, width, height);
+    cairo_fill(semantic_text_cr);
+    cairo_restore(semantic_text_cr);
+    cairo_append_path(semantic_text_cr, path);
+    cairo_path_destroy(path);
+
+    path = cairo_copy_path(semantic_stroke_cr);
+    cairo_new_path(semantic_stroke_cr);
+    cairo_save(semantic_stroke_cr);
+    cairo_identity_matrix(semantic_stroke_cr);
+    cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_CLEAR);
+    cairo_rectangle(semantic_stroke_cr,
+                    x * SEMANTIC_STROKE_SCALE,
+                    y * SEMANTIC_STROKE_SCALE,
+                    width * SEMANTIC_STROKE_SCALE,
+                    height * SEMANTIC_STROKE_SCALE);
+    cairo_fill(semantic_stroke_cr);
+    cairo_restore(semantic_stroke_cr);
+    cairo_append_path(semantic_stroke_cr, path);
+    cairo_path_destroy(path);
+}
+
 //---------------------------------------
 //--- extern function definitions
 
 void screen_init(void) {
     surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 128, 64);
     cr = cr_primary = cairo_create(surface);
+    semantic_surfaces_valid = true;
+    if (semantic_surfaces_requested()) {
+        semantic_text_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 128, 64);
+        semantic_text_cr = cairo_create(semantic_text_surface);
+        semantic_stroke_surface = cairo_image_surface_create(
+            CAIRO_FORMAT_ARGB32, 128 * SEMANTIC_STROKE_SCALE, 64 * SEMANTIC_STROKE_SCALE);
+        semantic_stroke_cr = cairo_create(semantic_stroke_surface);
+        // Logical integer coordinates land on physical pixel centers. Without
+        // this offset a nominal one-pixel axis-aligned stroke can straddle two
+        // Sharp pixels when antialiasing is disabled.
+        cairo_translate(semantic_stroke_cr, 0.5, 0.5);
+        cairo_scale(semantic_stroke_cr, SEMANTIC_STROKE_SCALE, SEMANTIC_STROKE_SCALE);
+        semantic_text_clear();
+        semantic_text_set_hard_antialias();
+    }
 
     cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
     cairo_paint(cr);
@@ -112,7 +323,13 @@ void screen_text_right(const char *s) {
     cairo_text_extents_t extents;
     cairo_text_extents(cr, s, &extents);
     cairo_rel_move_to(cr, -extents.width, 0);
+    if (semantic_text_active()) {
+        cairo_rel_move_to(semantic_text_cr, -extents.width, 0);
+        cairo_rel_move_to(semantic_stroke_cr, -extents.width, 0);
+    }
     cairo_show_text(cr, s);
+    if (semantic_text_active())
+        semantic_show_text(s);
 }
 
 void screen_text_center(const char *s) {
@@ -126,7 +343,13 @@ void screen_text_center(const char *s) {
     // which can widen centered text and join adjacent labels.
     x = floor(x - extents.width * 0.5 + 0.5);
     cairo_move_to(cr, x, y);
+    if (semantic_text_active()) {
+        cairo_move_to(semantic_text_cr, x, y);
+        cairo_move_to(semantic_stroke_cr, x, y);
+    }
     cairo_show_text(cr, s);
+    if (semantic_text_active())
+        semantic_show_text(s);
 }
 
 void screen_text_trim(char *s, double w) {
@@ -140,6 +363,8 @@ void screen_text_trim(char *s, double w) {
         }
     } while (extents.width > w);
     cairo_show_text(cr, s);
+    if (semantic_text_active())
+        semantic_show_text(s);
 }
 
 void screen_current_point() {
@@ -274,6 +499,13 @@ void init_font_faces(void) {
     // default font
     cairo_set_font_face(cr, ct[0]);
     cairo_set_font_size(cr, 8.0);
+    if (semantic_text_cr != NULL && semantic_stroke_cr != NULL) {
+        cairo_set_font_face(semantic_text_cr, ct[0]);
+        cairo_set_font_size(semantic_text_cr, 8.0);
+        cairo_set_font_face(semantic_stroke_cr, ct[0]);
+        cairo_set_font_size(semantic_stroke_cr, 8.0);
+        semantic_text_set_hard_antialias();
+    }
 
     fprintf(stderr, "font setup OK.\n");
     matron_io_t *io;
@@ -283,10 +515,33 @@ void init_font_faces(void) {
         matron_fb_t *fb = (matron_fb_t *)io;
         screen_ops_t *fb_ops = (screen_ops_t *)io->ops;
         fb_ops->bind(fb, surface);
+        if (fb_ops->bind_semantics != NULL) {
+            screen_semantics_t semantics;
+            semantics.text = semantic_text_surface;
+            semantics.stroke = semantic_stroke_surface;
+            semantics.valid = &semantic_surfaces_valid;
+            fb_ops->bind_semantics(fb, &semantics);
+        }
     }
 }
 
 void screen_deinit(void) {
+    if (semantic_stroke_cr != NULL) {
+        cairo_destroy(semantic_stroke_cr);
+        semantic_stroke_cr = NULL;
+    }
+    if (semantic_stroke_surface != NULL) {
+        cairo_surface_destroy(semantic_stroke_surface);
+        semantic_stroke_surface = NULL;
+    }
+    if (semantic_text_cr != NULL) {
+        cairo_destroy(semantic_text_cr);
+        semantic_text_cr = NULL;
+    }
+    if (semantic_text_surface != NULL) {
+        cairo_surface_destroy(semantic_text_surface);
+        semantic_text_surface = NULL;
+    }
     if (cr != NULL) {
         cairo_destroy(cr);
         cr = NULL;
@@ -327,20 +582,36 @@ void screen_update(void) {
 
 void screen_save(void) {
     cairo_save(cr);
+    if (semantic_text_active()) {
+        cairo_save(semantic_text_cr);
+        cairo_save(semantic_stroke_cr);
+    }
 }
 
 void screen_restore(void) {
     cairo_restore(cr);
+    if (semantic_text_active()) {
+        cairo_restore(semantic_text_cr);
+        cairo_restore(semantic_stroke_cr);
+    }
 }
 
 void screen_font_face(int i) {
     if ((i >= 0) && (i < NUM_FONTS)) {
         cairo_set_font_face(cr, ct[i]);
+        if (semantic_text_active()) {
+            cairo_set_font_face(semantic_text_cr, ct[i]);
+            cairo_set_font_face(semantic_stroke_cr, ct[i]);
+        }
     }
 }
 
 void screen_font_size(double z) {
     cairo_set_font_size(cr, z);
+    if (semantic_text_active()) {
+        cairo_set_font_size(semantic_text_cr, z);
+        cairo_set_font_size(semantic_stroke_cr, z);
+    }
 }
 
 void screen_aa(int s) {
@@ -354,6 +625,8 @@ void screen_aa(int s) {
     }
     cairo_set_font_options(cr, font_options);
     cairo_font_options_destroy(font_options);
+    if (semantic_text_active())
+        semantic_text_set_hard_antialias();
 }
 
 void screen_brightness(int v) {
@@ -408,88 +681,176 @@ void screen_invert(int inverted) {
 void screen_level(int z) {
     z = z < 0 ? 0 : (z > 15 ? 15 : z);
     cairo_set_source_rgb(cr, c[z], c[z], c[z]);
+    if (semantic_text_active()) {
+        cairo_set_source_rgb(semantic_text_cr, c[z], c[z], c[z]);
+        cairo_set_source_rgb(semantic_stroke_cr, c[z], c[z], c[z]);
+    }
 }
 
 void screen_line_width(double w) {
     cairo_set_line_width(cr, w);
+    if (semantic_text_active()) {
+        cairo_set_line_width(semantic_text_cr, w);
+        cairo_set_line_width(semantic_stroke_cr, w);
+    }
 }
 
 void screen_line_cap(const char *style) {
     if (strcmp(style, "round") == 0) {
         cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+        if (semantic_text_active()) {
+            cairo_set_line_cap(semantic_text_cr, CAIRO_LINE_CAP_ROUND);
+            cairo_set_line_cap(semantic_stroke_cr, CAIRO_LINE_CAP_ROUND);
+        }
     } else if (strcmp(style, "square") == 0) {
         cairo_set_line_cap(cr, CAIRO_LINE_CAP_SQUARE);
+        if (semantic_text_active()) {
+            cairo_set_line_cap(semantic_text_cr, CAIRO_LINE_CAP_SQUARE);
+            cairo_set_line_cap(semantic_stroke_cr, CAIRO_LINE_CAP_SQUARE);
+        }
     } else {
         cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+        if (semantic_text_active()) {
+            cairo_set_line_cap(semantic_text_cr, CAIRO_LINE_CAP_BUTT);
+            cairo_set_line_cap(semantic_stroke_cr, CAIRO_LINE_CAP_BUTT);
+        }
     }
 }
 
 void screen_line_join(const char *style) {
     if (strcmp(style, "round") == 0) {
         cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+        if (semantic_text_active()) {
+            cairo_set_line_join(semantic_text_cr, CAIRO_LINE_JOIN_ROUND);
+            cairo_set_line_join(semantic_stroke_cr, CAIRO_LINE_JOIN_ROUND);
+        }
     } else if (strcmp(style, "bevel") == 0) {
         cairo_set_line_join(cr, CAIRO_LINE_JOIN_BEVEL);
+        if (semantic_text_active()) {
+            cairo_set_line_join(semantic_text_cr, CAIRO_LINE_JOIN_BEVEL);
+            cairo_set_line_join(semantic_stroke_cr, CAIRO_LINE_JOIN_BEVEL);
+        }
     } else {
         cairo_set_line_join(cr, CAIRO_LINE_JOIN_MITER);
+        if (semantic_text_active()) {
+            cairo_set_line_join(semantic_text_cr, CAIRO_LINE_JOIN_MITER);
+            cairo_set_line_join(semantic_stroke_cr, CAIRO_LINE_JOIN_MITER);
+        }
     }
 }
 
 void screen_miter_limit(double limit) {
     cairo_set_miter_limit(cr, limit);
+    if (semantic_text_active()) {
+        cairo_set_miter_limit(semantic_text_cr, limit);
+        cairo_set_miter_limit(semantic_stroke_cr, limit);
+    }
 }
 
 void screen_move(double x, double y) {
     cairo_move_to(cr, x, y);
+    if (semantic_text_active()) {
+        cairo_move_to(semantic_text_cr, x, y);
+        cairo_move_to(semantic_stroke_cr, x, y);
+    }
 }
 
 void screen_line(double x, double y) {
     cairo_line_to(cr, x, y);
+    if (semantic_text_active()) {
+        cairo_line_to(semantic_text_cr, x, y);
+        cairo_line_to(semantic_stroke_cr, x, y);
+    }
 }
 
 void screen_line_rel(double x, double y) {
     cairo_rel_line_to(cr, x, y);
+    if (semantic_text_active()) {
+        cairo_rel_line_to(semantic_text_cr, x, y);
+        cairo_rel_line_to(semantic_stroke_cr, x, y);
+    }
 }
 
 void screen_move_rel(double x, double y) {
     cairo_rel_move_to(cr, x, y);
+    if (semantic_text_active()) {
+        cairo_rel_move_to(semantic_text_cr, x, y);
+        cairo_rel_move_to(semantic_stroke_cr, x, y);
+    }
 }
 
 void screen_curve(double x1, double y1, double x2, double y2, double x3, double y3) {
     cairo_curve_to(cr, x1, y1, x2, y2, x3, y3);
+    if (semantic_text_active()) {
+        cairo_curve_to(semantic_text_cr, x1, y1, x2, y2, x3, y3);
+        cairo_curve_to(semantic_stroke_cr, x1, y1, x2, y2, x3, y3);
+    }
 }
 
 void screen_curve_rel(double dx1, double dy1, double dx2, double dy2, double dx3, double dy3) {
     cairo_rel_curve_to(cr, dx1, dy1, dx2, dy2, dx3, dy3);
+    if (semantic_text_active()) {
+        cairo_rel_curve_to(semantic_text_cr, dx1, dy1, dx2, dy2, dx3, dy3);
+        cairo_rel_curve_to(semantic_stroke_cr, dx1, dy1, dx2, dy2, dx3, dy3);
+    }
 }
 
 void screen_arc(double x, double y, double r, double a1, double a2) {
     cairo_arc(cr, x, y, r, a1, a2);
+    if (semantic_text_active()) {
+        cairo_arc(semantic_text_cr, x, y, r, a1, a2);
+        cairo_arc(semantic_stroke_cr, x, y, r, a1, a2);
+    }
 }
 
 void screen_rect(double x, double y, double w, double h) {
     cairo_rectangle(cr, x, y, w, h);
+    if (semantic_text_active()) {
+        cairo_rectangle(semantic_text_cr, x, y, w, h);
+        cairo_rectangle(semantic_stroke_cr, x, y, w, h);
+    }
 }
 
 void screen_close_path(void) {
     cairo_close_path(cr);
+    if (semantic_text_active()) {
+        cairo_close_path(semantic_text_cr);
+        cairo_close_path(semantic_stroke_cr);
+    }
 }
 
 void screen_stroke(void) {
     cairo_stroke(cr);
+    if (semantic_text_active()) {
+        semantic_text_erase_path(true);
+        semantic_stroke_draw();
+    }
 }
 
 void screen_fill(void) {
     cairo_fill(cr);
+    if (semantic_text_active()) {
+        semantic_text_erase_path(false);
+        semantic_stroke_erase_path(false);
+    }
 }
 
 void screen_text(const char *s) {
     cairo_show_text(cr, s);
+    if (semantic_text_active())
+        semantic_show_text(s);
 }
 
 void screen_clear(void) {
     cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
     cairo_paint(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+    if (semantic_text_active()) {
+        semantic_text_clear();
+        cairo_set_operator(semantic_text_cr, CAIRO_OPERATOR_OVER);
+        cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_OVER);
+        semantic_surfaces_valid = true;
+    }
     surface_may_have_color = false;
 }
 
@@ -567,6 +928,8 @@ void screen_display_png(const char *filename, double x, double y) {
     cairo_fill(cr);
     cairo_surface_destroy(image);
     cairo_restore(cr);
+    if (semantic_text_active())
+        semantic_text_erase_rectangle(x, y, img_w, img_h);
 }
 
 void screen_peek(int x, int y, int w, int h) {
@@ -617,19 +980,35 @@ void screen_poke(int x, int y, int w, int h, unsigned char *buf) {
         }
     }
     cairo_surface_mark_dirty(surface);
+    if (semantic_text_active())
+        semantic_text_erase_raw_rectangle(x, y, w, h);
 }
 
 void screen_rotate(double r) {
     cairo_rotate(cr, r);
+    if (semantic_text_active()) {
+        cairo_rotate(semantic_text_cr, r);
+        cairo_rotate(semantic_stroke_cr, r);
+    }
 }
 
 void screen_translate(double x, double y) {
     cairo_translate(cr, x, y);
+    if (semantic_text_active()) {
+        cairo_translate(semantic_text_cr, x, y);
+        cairo_translate(semantic_stroke_cr, x, y);
+    }
 }
 
 void screen_set_operator(int i) {
-    if (0 <= i && i <= 29) {
+    if (0 <= i && i < NUM_OPS) {
         cairo_set_operator(cr, ops[i]);
+        if (semantic_text_active()) {
+            cairo_set_operator(semantic_text_cr, ops[i]);
+            cairo_set_operator(semantic_stroke_cr, ops[i]);
+            if (i != 0 && i != 15)
+                semantic_surfaces_valid = false;
+        }
     }
 }
 
@@ -681,6 +1060,8 @@ void screen_surface_display(screen_surface_t *s, double x, double y) {
     cairo_rectangle(cr, x, y, width, height);
     cairo_fill(cr);
     cairo_restore(cr);
+    if (semantic_text_active())
+        semantic_text_erase_rectangle(x, y, width, height);
 }
 
 void screen_surface_display_region(screen_surface_t *s,
@@ -692,6 +1073,8 @@ void screen_surface_display_region(screen_surface_t *s,
     cairo_rectangle(cr, x, y, width, height);
     cairo_fill(cr);
     cairo_restore(cr);
+    if (semantic_text_active())
+        semantic_text_erase_rectangle(x, y, width, height);
 }
 
 void screen_context_new(screen_surface_t *target) {

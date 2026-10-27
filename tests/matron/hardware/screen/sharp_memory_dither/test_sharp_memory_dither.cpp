@@ -40,6 +40,41 @@ TEST_CASE("All 16 norns levels produce distinct ordered-dither coverage") {
     CHECK(previous_white == 64);
 }
 
+TEST_CASE("3x3 tiles give all 16 norns levels distinct average coverage") {
+    int previous_white = -1;
+    for (int level = 0; level < 16; ++level) {
+        const uint8_t luminance = (uint8_t)(level * 17);
+        int white = 0;
+        // Five horizontal logical pixels exercise all five density phases.
+        for (uint32_t y = 0; y < 3; ++y) {
+            for (uint32_t x = 0; x < 15; ++x)
+                white += sharp_memory_tile3x3_is_white(luminance, x, y, 1, false) ? 1 : 0;
+        }
+        CHECK(white > previous_white);
+        CHECK(white == (level == 0 ? 0 : (level == 15 ? 45 : level * 3 + 1)));
+        previous_white = white;
+    }
+}
+
+TEST_CASE("3x3 tiles are stable, anchored, and invertible") {
+    for (uint32_t y = 0; y < 15; ++y) {
+        for (uint32_t x = 0; x < 15; ++x) {
+            const bool normal = sharp_memory_tile3x3_is_white(119, x, y, 1, false);
+            CHECK(sharp_memory_tile3x3_is_white(119, x, y, 1, false) == normal);
+            CHECK(sharp_memory_tile3x3_is_white(119, x, y, 1, true) != normal);
+        }
+    }
+}
+
+TEST_CASE("Text shadows adapt to norns level") {
+    CHECK(sharp_memory_text_shadow_count(0, 8) == 0);
+    CHECK(sharp_memory_text_shadow_count(17, 8) == 1);
+    CHECK(sharp_memory_text_shadow_count(7 * 17, 8) == 1);
+    CHECK(sharp_memory_text_shadow_count(8 * 17, 8) == 2);
+    CHECK(sharp_memory_text_shadow_count(14 * 17, 8) == 2);
+    CHECK(sharp_memory_text_shadow_count(255, 8) == 0);
+}
+
 TEST_CASE("Edge contrast is the largest four-neighbor luminance difference") {
     CHECK(sharp_memory_edge_contrast(100, 90, 120, 60, 101) == 40);
     CHECK(sharp_memory_edge_contrast(0, 0, 0, 0, 255) == 255);

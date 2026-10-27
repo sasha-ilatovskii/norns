@@ -732,8 +732,9 @@ def test(bld: BuildContext):
 
     # common libs many tests require. NNG is here so units that compile
     # norns/sidecar.cpp link, the tests themselves never reach the transport.
+    # Cairo is also needed by screen renderer units.
     link_libs = ["pthread"]
-    uselibs = ["LUA53", "NNG", "ATOMIC"]
+    uselibs = ["LUA53", "NNG", "ATOMIC", "CAIRO"]
 
     # collect test units
     test_units: List[TestUnit] = []

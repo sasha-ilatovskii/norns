@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <cairo.h>
 #include <lualib.h>
 #include <sys/queue.h>
@@ -45,11 +46,24 @@ extern TAILQ_HEAD(io_head, _matron_io) io_queue;
 //// screen
 struct _matron_fb;
 
+typedef struct _screen_semantics {
+    // Transparent ARGB32 surface containing only text. Glyph coverage is
+    // deliberately rendered without antialiasing; RGB stores the norns level.
+    cairo_surface_t *text;
+    // Transparent ARGB32 surface containing the already-styled physical
+    // stroke mask. The backend maps it to the output viewport as-is.
+    cairo_surface_t *stroke;
+    // False asks a backend to fall back to the canonical framebuffer for a
+    // frame containing blend operations the semantic layers cannot reproduce.
+    const bool *valid;
+} screen_semantics_t;
+
 typedef struct _screen_ops {
     io_ops_t io_ops;
 
     void (*paint)(struct _matron_fb *fb);
     void (*bind)(struct _matron_fb *fb, cairo_surface_t *surface);
+    void (*bind_semantics)(struct _matron_fb *fb, const screen_semantics_t *semantics);
 } screen_ops_t;
 
 typedef struct _matron_fb {

@@ -15,13 +15,21 @@ _boot.add_io('screen:sharp-memory', {
   -- LS027B7DH01 maximum SPI clock.
   speed_hz = 2000000,
 
-  -- A 400x240 frame takes about 50 ms at the panel's 2 MHz SPI limit, so
-  -- 15 fps leaves some headroom for SPI and scheduler overhead.
-  fps = 15,
+  -- A 400x240 frame takes about 50 ms at the panel's 2 MHz SPI limit. Eight
+  -- fps is the tested stable rate and prevents refresh work from accumulating.
+  fps = 8,
 
-  -- Preserve Bayer 8x8 in flat areas while reducing its threshold variation
-  -- near high-contrast Cairo edges. Use 'bayer8' for the original mode.
-  dither = 'edge-aware',
+  -- Hand-tuned 3x3 tiles align exactly with the 3x screen scale and retain all
+  -- 16 norns levels by distributing fractional density across five tiles.
+  -- Alternatives are 'edge-aware' and 'bayer8'.
+  dither = 'tile3x3',
+  tile_density_boost = 1,
+
+  -- Text is rerasterized without antialiasing. Levels 1..7 receive a solid
+  -- one-pixel diagonal shadow; levels 8..14 receive a second pixel; level 15
+  -- needs no shadow because it is already solid.
+  text_shadow = true,
+  text_second_shadow_level = 8,
 
   -- false preserves the original white-on-black norns appearance. Set true
   -- for a paper-like black-on-white display.

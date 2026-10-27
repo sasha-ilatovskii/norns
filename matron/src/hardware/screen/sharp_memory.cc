@@ -28,6 +28,12 @@
 #define SHARP_MEMORY_DUMP_PATH "/tmp/sharp-frame.pbm"
 #define SHARP_MEMORY_DUMP_TEMP_PATH "/tmp/sharp-frame.pbm.tmp"
 
+typedef enum _sharp_memory_dither_mode {
+    SHARP_MEMORY_DITHER_BAYER8,
+    SHARP_MEMORY_DITHER_EDGE_AWARE,
+    SHARP_MEMORY_DITHER_TILE3X3,
+} sharp_memory_dither_mode_t;
+
 typedef struct _screen_sharp_memory_priv {
     char *dev;
     char *cs_chip;
@@ -40,11 +46,17 @@ typedef struct _screen_sharp_memory_priv {
     uint8_t *packet;
     size_t packet_size;
     cairo_surface_t *source;
+    cairo_surface_t *text;
+    cairo_surface_t *stroke;
+    const bool *semantics_valid;
     int fps;
     uint32_t speed_hz;
     bool invert;
     bool stretch;
-    bool edge_aware;
+    sharp_memory_dither_mode_t dither_mode;
+    uint8_t tile_density_boost;
+    bool text_shadow;
+    uint8_t text_second_shadow_level;
     bool vcom;
     volatile bool refresh_running;
     pthread_t refresh_thread;
@@ -58,6 +70,8 @@ static int screen_sharp_memory_setup(matron_io_t *io);
 static void screen_sharp_memory_destroy(matron_io_t *io);
 static void screen_sharp_memory_paint(matron_fb_t *fb);
 static void screen_sharp_memory_bind(matron_fb_t *fb, cairo_surface_t *surface);
+static void screen_sharp_memory_bind_semantics(matron_fb_t *fb,
+                                               const screen_semantics_t *semantics);
 
 screen_ops_t screen_sharp_memory_ops = {
     {
@@ -71,6 +85,7 @@ screen_ops_t screen_sharp_memory_ops = {
     },
     screen_sharp_memory_paint, // .paint
     screen_sharp_memory_bind,  // .bind
+    screen_sharp_memory_bind_semantics, // .bind_semantics
 };
 
 static int config_string(lua_State *l, int table, const char *name, char **value, const char *fallback) {
@@ -113,7 +128,7 @@ static bool config_boolean(lua_State *l, int table, const char *name, bool fallb
     return value;
 }
 
-static int config_dither(lua_State *l, int table, bool *edge_aware) {
+static int config_dither(lua_State *l, int table, sharp_memory_dither_mode_t *mode) {
     lua_getfield(l, table, "dither");
     const char *value = "bayer8";
     if (lua_isstring(l, -1)) {
@@ -125,12 +140,15 @@ static int config_dither(lua_State *l, int table, bool *edge_aware) {
     }
 
     if (strcmp(value, "bayer8") == 0) {
-        *edge_aware = false;
+        *mode = SHARP_MEMORY_DITHER_BAYER8;
     } else if (strcmp(value, "edge-aware") == 0) {
-        *edge_aware = true;
+        *mode = SHARP_MEMORY_DITHER_EDGE_AWARE;
+    } else if (strcmp(value, "tile3x3") == 0 || strcmp(value, "tile16") == 0) {
+        *mode = SHARP_MEMORY_DITHER_TILE3X3;
     } else {
         fprintf(stderr,
-                "ERROR (screen:sharp-memory) 'dither' must be 'bayer8' or 'edge-aware'\n");
+                "ERROR (screen:sharp-memory) 'dither' must be 'bayer8', "
+                "'edge-aware', or 'tile3x3'\n");
         lua_pop(l, 1);
         return -1;
     }
@@ -164,7 +182,7 @@ static int screen_sharp_memory_config(matron_io_t *io, lua_State *l) {
     }
     priv->cs_line_offset = (unsigned int)cs_line;
 
-    priv->fps = config_integer(l, 2, "fps", 15);
+    priv->fps = config_integer(l, 2, "fps", 8);
     if (priv->fps < 1 || priv->fps > 20) {
         fprintf(stderr, "ERROR (screen:sharp-memory) 'fps' must be between 1 and 20\n");
         free(priv->cs_chip);
@@ -185,13 +203,39 @@ static int screen_sharp_memory_config(matron_io_t *io, lua_State *l) {
     }
     priv->speed_hz = (uint32_t)speed_hz;
 
-    if (config_dither(l, 2, &priv->edge_aware) != 0) {
+    if (config_dither(l, 2, &priv->dither_mode) != 0) {
         free(priv->cs_chip);
         free(priv->dev);
         priv->cs_chip = NULL;
         priv->dev = NULL;
         return -1;
     }
+
+    const int tile_density_boost = config_integer(l, 2, "tile_density_boost", 1);
+    if (tile_density_boost < 0 || tile_density_boost > 2) {
+        fprintf(stderr,
+                "ERROR (screen:sharp-memory) 'tile_density_boost' must be between 0 and 2\n");
+        free(priv->cs_chip);
+        free(priv->dev);
+        priv->cs_chip = NULL;
+        priv->dev = NULL;
+        return -1;
+    }
+    priv->tile_density_boost = (uint8_t)tile_density_boost;
+
+    const int text_second_shadow_level =
+        config_integer(l, 2, "text_second_shadow_level", 8);
+    if (text_second_shadow_level < 1 || text_second_shadow_level > 14) {
+        fprintf(stderr,
+                "ERROR (screen:sharp-memory) 'text_second_shadow_level' must be between 1 and 14\n");
+        free(priv->cs_chip);
+        free(priv->dev);
+        priv->cs_chip = NULL;
+        priv->dev = NULL;
+        return -1;
+    }
+    priv->text_second_shadow_level = (uint8_t)text_second_shadow_level;
+    priv->text_shadow = config_boolean(l, 2, "text_shadow", true);
 
     priv->invert = config_boolean(l, 2, "invert", false);
     priv->stretch = config_boolean(l, 2, "stretch", false);
@@ -509,11 +553,16 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
         return -1;
     }
 
+    const char *dither_name = "bayer8";
+    if (priv->dither_mode == SHARP_MEMORY_DITHER_EDGE_AWARE)
+        dither_name = "edge-aware";
+    else if (priv->dither_mode == SHARP_MEMORY_DITHER_TILE3X3)
+        dither_name = "tile3x3";
     fprintf(stderr,
             "screen:sharp-memory: %s %dx%d, CS=%s:%u, %u Hz SPI, %d fps, dither=%s, invert=%s, stretch=%s\n",
             priv->dev, SHARP_MEMORY_WIDTH, SHARP_MEMORY_HEIGHT, priv->cs_chip,
             priv->cs_line_offset, priv->speed_hz, priv->fps,
-            priv->edge_aware ? "edge-aware" : "bayer8",
+            dither_name,
             priv->invert ? "yes" : "no", priv->stretch ? "yes" : "no");
     return 0;
 }
@@ -528,6 +577,14 @@ static void screen_sharp_memory_destroy(matron_io_t *io) {
     if (priv->source != NULL) {
         cairo_surface_destroy(priv->source);
         priv->source = NULL;
+    }
+    if (priv->text != NULL) {
+        cairo_surface_destroy(priv->text);
+        priv->text = NULL;
+    }
+    if (priv->stroke != NULL) {
+        cairo_surface_destroy(priv->stroke);
+        priv->stroke = NULL;
     }
     if (priv->frame != NULL) {
         pthread_mutex_lock(&priv->paint_lock);
@@ -565,6 +622,85 @@ static uint8_t source_luminance(const uint8_t *source_data,
     uint32_t argb;
     memcpy(&argb, source_data + (size_t)y * source_stride + x * 4, 4);
     return sharp_memory_luminance(argb);
+}
+
+static bool semantic_text_luminance(const screen_sharp_memory_priv_t *priv,
+                                    const sharp_memory_viewport_t *viewport,
+                                    int32_t viewport_x,
+                                    int32_t viewport_y,
+                                    uint8_t *luminance) {
+    if (priv->text == NULL || viewport_x < 0 || viewport_y < 0 ||
+        (uint32_t)viewport_x >= viewport->width ||
+        (uint32_t)viewport_y >= viewport->height)
+        return false;
+
+    const uint32_t text_width = (uint32_t)cairo_image_surface_get_width(priv->text);
+    const uint32_t text_height = (uint32_t)cairo_image_surface_get_height(priv->text);
+    if (text_width == 0 || text_height == 0)
+        return false;
+
+    const uint32_t text_x =
+        (uint32_t)(((uint64_t)(uint32_t)viewport_x * text_width) / viewport->width);
+    const uint32_t text_y =
+        (uint32_t)(((uint64_t)(uint32_t)viewport_y * text_height) / viewport->height);
+    const int text_stride = cairo_image_surface_get_stride(priv->text);
+    const uint8_t *text_data = cairo_image_surface_get_data(priv->text);
+    if (text_data == NULL)
+        return false;
+
+    uint32_t argb;
+    memcpy(&argb, text_data + (size_t)text_y * text_stride + text_x * 4, 4);
+    if ((argb >> 24) < 128)
+        return false;
+    *luminance = sharp_memory_luminance(argb);
+    return true;
+}
+
+static bool semantic_text_shadow_at(const screen_sharp_memory_priv_t *priv,
+                                    const sharp_memory_viewport_t *viewport,
+                                    uint32_t viewport_x,
+                                    uint32_t viewport_y) {
+    if (!priv->text_shadow)
+        return false;
+
+    for (uint8_t offset = 1; offset <= 2; ++offset) {
+        uint8_t luminance;
+        if (semantic_text_luminance(priv,
+                                    viewport,
+                                    (int32_t)viewport_x - offset,
+                                    (int32_t)viewport_y - offset,
+                                    &luminance) &&
+            sharp_memory_text_shadow_count(
+                luminance, priv->text_second_shadow_level) >= offset)
+            return true;
+    }
+    return false;
+}
+
+static bool semantic_stroke_at(const screen_sharp_memory_priv_t *priv,
+                               const sharp_memory_viewport_t *viewport,
+                               uint32_t viewport_x,
+                               uint32_t viewport_y) {
+    if (priv->stroke == NULL)
+        return false;
+
+    const uint32_t stroke_width = (uint32_t)cairo_image_surface_get_width(priv->stroke);
+    const uint32_t stroke_height = (uint32_t)cairo_image_surface_get_height(priv->stroke);
+    if (stroke_width == 0 || stroke_height == 0)
+        return false;
+
+    const uint32_t stroke_x =
+        (uint32_t)(((uint64_t)viewport_x * stroke_width) / viewport->width);
+    const uint32_t stroke_y =
+        (uint32_t)(((uint64_t)viewport_y * stroke_height) / viewport->height);
+    const int stroke_stride = cairo_image_surface_get_stride(priv->stroke);
+    const uint8_t *stroke_data = cairo_image_surface_get_data(priv->stroke);
+    if (stroke_data == NULL)
+        return false;
+
+    uint32_t argb;
+    memcpy(&argb, stroke_data + (size_t)stroke_y * stroke_stride + stroke_x * 4, 4);
+    return (argb >> 24) >= 128;
 }
 
 static bool write_all(int fd, const void *data, size_t size) {
@@ -644,6 +780,10 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
 
     pthread_mutex_lock(&priv->paint_lock);
     cairo_surface_flush(priv->source);
+    if (priv->text != NULL)
+        cairo_surface_flush(priv->text);
+    if (priv->stroke != NULL)
+        cairo_surface_flush(priv->stroke);
 
     const uint32_t source_width = (uint32_t)cairo_image_surface_get_width(priv->source);
     const uint32_t source_height = (uint32_t)cairo_image_surface_get_height(priv->source);
@@ -664,7 +804,7 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
                         (uint32_t)(((uint64_t)(y - viewport.y) * source_height) / viewport.height);
                     const uint8_t luminance =
                         source_luminance(source_data, source_stride, source_x, source_y);
-                    if (priv->edge_aware) {
+                    if (priv->dither_mode == SHARP_MEMORY_DITHER_EDGE_AWARE) {
                         const uint32_t left_x = source_x > 0 ? source_x - 1 : source_x;
                         const uint32_t right_x =
                             source_x + 1 < source_width ? source_x + 1 : source_x;
@@ -679,6 +819,40 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
                             source_luminance(source_data, source_stride, source_x, below_y));
                         white = sharp_memory_edge_aware_dither_is_white(
                             luminance, contrast, x - viewport.x, y - viewport.y, priv->invert);
+                    } else if (priv->dither_mode == SHARP_MEMORY_DITHER_TILE3X3) {
+                        const uint32_t viewport_x = x - viewport.x;
+                        const uint32_t viewport_y = y - viewport.y;
+                        const bool use_semantics =
+                            priv->semantics_valid == NULL || *priv->semantics_valid;
+                        uint8_t text_luminance;
+                        if (use_semantics &&
+                            semantic_text_luminance(priv,
+                                                    &viewport,
+                                                    (int32_t)viewport_x,
+                                                    (int32_t)viewport_y,
+                                                    &text_luminance)) {
+                            white = sharp_memory_tile3x3_is_white(
+                                text_luminance,
+                                viewport_x,
+                                viewport_y,
+                                priv->tile_density_boost,
+                                priv->invert);
+                        } else if (use_semantics && semantic_stroke_at(
+                                       priv, &viewport, viewport_x, viewport_y)) {
+                            white = !priv->invert;
+                        } else if (use_semantics && semantic_text_shadow_at(
+                                       priv, &viewport, viewport_x, viewport_y)) {
+                            // Solid maximum-level ink: white in the logical
+                            // norns palette, black in paper/inverted mode.
+                            white = !priv->invert;
+                        } else {
+                            white = sharp_memory_tile3x3_is_white(
+                                luminance,
+                                viewport_x,
+                                viewport_y,
+                                priv->tile_density_boost,
+                                priv->invert);
+                        }
                     } else {
                         white = sharp_memory_dither_is_white(
                             luminance, x - viewport.x, y - viewport.y, priv->invert);
@@ -700,4 +874,20 @@ static void screen_sharp_memory_bind(matron_fb_t *fb, cairo_surface_t *surface) 
     if (priv->source != NULL)
         cairo_surface_destroy(priv->source);
     priv->source = cairo_surface_reference(surface);
+}
+
+static void screen_sharp_memory_bind_semantics(matron_fb_t *fb,
+                                               const screen_semantics_t *semantics) {
+    screen_sharp_memory_priv_t *priv = (screen_sharp_memory_priv_t *)fb->io.data;
+    if (priv->text != NULL)
+        cairo_surface_destroy(priv->text);
+    if (priv->stroke != NULL)
+        cairo_surface_destroy(priv->stroke);
+    priv->text = semantics != NULL && semantics->text != NULL
+                     ? cairo_surface_reference(semantics->text)
+                     : NULL;
+    priv->stroke = semantics != NULL && semantics->stroke != NULL
+                       ? cairo_surface_reference(semantics->stroke)
+                       : NULL;
+    priv->semantics_valid = semantics != NULL ? semantics->valid : NULL;
 }

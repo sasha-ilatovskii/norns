@@ -3,9 +3,9 @@
 This port keeps the norns drawing API at 128x64 and adds a hardware output
 backend named `screen:sharp-memory`. By default the backend maps every Cairo
 pixel to an exact 3x3 block, yielding a centered 384x192 image on the 400x240
-panel. It uses deterministic edge-aware 8x8 Bayer dithering to represent all
-16 norns levels on a monochrome display while keeping high-contrast contours
-clean.
+panel. Its default renderer uses hand-tuned 3x3 patterns to represent all 16
+norns levels. Text and stroked paths carry semantic side layers so they can be
+optimized independently without changing the public `screen` API.
 
 The backend speaks the Sharp Memory LCD protocol directly through Linux
 `spidev`, with the display's active-high chip select driven by a separate GPIO.
@@ -141,13 +141,41 @@ may change `HOME`. The CM5 systemd units described below explicitly run as
 `me` with `HOME=/home/me`.
 
 The default configuration uses `/dev/spidev0.0`, line 25 of the `pinctrl-rp1`
-GPIO chip for CS, a 2 MHz SPI clock, and 15 frames per second. A complete frame
-takes about 50 ms at that clock rate.
-`dither='edge-aware'` keeps the full Bayer pattern in flat and low-contrast
-areas, then progressively pulls its thresholds towards 50 percent as local
-Cairo-pixel contrast increases. This makes antialiased black/white contours
-more solid without adding temporal shimmer. Set `dither='bayer8'` to compare
-with the original ordered-dither mode.
+GPIO chip for CS, a 2 MHz SPI clock, and the tested stable rate of 8 frames per
+second. A complete frame takes about 50 ms at that clock rate.
+
+`dither='tile3x3'` aligns every pattern with one exact 3x3 logical-pixel tile.
+Ten hand-tuned masks provide the integral densities; the fractional density is
+distributed across five neighboring tiles, so all 16 norns levels remain
+distinct. `tile_density_boost=1` makes intermediate levels slightly denser;
+valid values are 0 through 2.
+
+Text is rerasterized into a hard, non-antialiased mask. With
+`text_shadow=true`, levels 1 through 7 get one solid physical-pixel shadow at
+`+1,+1`; levels 8 through 14 get a second at `+2,+2`; level 15 gets no shadow.
+Change the split with `text_second_shadow_level`.
+
+Stroked paths are flattened and rerendered at the physical 384x192 resolution,
+so the same rules apply to horizontal, vertical, diagonal, arc, and Bezier
+paths. The procedural outline atlas consists of upper, center, and lower tracks
+offset along the local path normal. At the default `screen.line_width(1)`, each
+track is one physical Sharp pixel wide, making a fully lit level-15 stroke
+three pixels wide. Larger API line widths scale the three tracks together.
+
+Levels 1 through 4 draw only the center track with `16/1`, `24/1`, `40/1`,
+and `64/1` dash/space periods. Level 5 makes the center track solid. Levels 6
+through 14 progressively fill the upper and lower tracks in 16-pixel steps
+within an 80-pixel period; their phases are 9 and 49 pixels so gaps do not line
+up across the contour. Level 15 makes all three tracks solid. Filled paths,
+images, `poke`, and offscreen images continue through the normal 3x3 tile
+renderer. Frames that use a complex Cairo blend operator safely fall back to
+that normal framebuffer renderer.
+
+The alternative `dither='edge-aware'` keeps the full Bayer 8x8 pattern in flat
+areas and reduces threshold variation near high-contrast edges. Use
+`dither='bayer8'` for the original ordered-dither mode. Semantic text and stroke
+optimizations are active only in `tile3x3` mode.
+
 `invert=true` selects a paper-like black-on-white UI. With the default
 `stretch=false`, every 128x64 Cairo pixel occupies exactly 3x3 physical pixels,
 leaving 8-pixel side margins and 24-pixel top and bottom margins.
