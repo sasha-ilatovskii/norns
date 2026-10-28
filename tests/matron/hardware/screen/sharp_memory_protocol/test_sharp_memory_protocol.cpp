@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <vector>
+
 #include "hardware/screen/sharp_memory_protocol.h"
 
 TEST_CASE("Sharp Memory LCD protocol reverses bytes for MSB-first SPI") {
@@ -52,6 +54,46 @@ TEST_CASE("A 60-line panel chunk fits the default spidev transfer buffer") {
     CHECK(output[2] == 0x80);
     CHECK(output[1 + 59 * 52] == sharp_memory_reverse_byte(240));
     CHECK(output[sizeof(output) - 1] == 0x00);
+}
+
+TEST_CASE("row fragments concatenate to one complete frame transaction") {
+    constexpr uint32_t width = 400;
+    constexpr uint32_t height = 240;
+    constexpr uint32_t rows_per_fragment = 60;
+    std::vector<uint8_t> frame(width * height / 8);
+    for (size_t index = 0; index < frame.size(); ++index)
+        frame[index] = (uint8_t)(index * 37);
+
+    std::vector<uint8_t> complete(sharp_memory_encoded_rows_size(width, height));
+    REQUIRE(sharp_memory_encode_rows(complete.data(),
+                                     complete.size(),
+                                     frame.data(),
+                                     width,
+                                     0,
+                                     height,
+                                     true) == complete.size());
+
+    std::vector<uint8_t> fragments;
+    for (uint32_t first_row = 0; first_row < height;
+         first_row += rows_per_fragment) {
+        const bool first = first_row == 0;
+        const bool last = first_row + rows_per_fragment == height;
+        const size_t size = sharp_memory_encoded_rows_fragment_size(
+            width, rows_per_fragment, first, last);
+        const size_t offset = fragments.size();
+        fragments.resize(offset + size);
+        REQUIRE(sharp_memory_encode_rows_fragment(fragments.data() + offset,
+                                                  size,
+                                                  frame.data(),
+                                                  width,
+                                                  first_row,
+                                                  rows_per_fragment,
+                                                  true,
+                                                  first,
+                                                  last) == size);
+    }
+
+    CHECK(fragments == complete);
 }
 
 TEST_CASE("Sharp Memory LCD protocol rejects invalid buffers and rows") {

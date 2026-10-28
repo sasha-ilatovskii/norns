@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 extern void screen_events_init();
+extern void screen_events_deinit();
 
 extern void screen_event_update(void);
 extern void screen_event_save(void);
@@ -36,6 +37,7 @@ extern void screen_event_clear(void);
 extern void screen_event_close_path(void);
 extern void screen_event_text_extents(const char *s);
 extern void screen_event_export_png(const char *s);
+extern void screen_event_export_screenshot(const char *s);
 extern void screen_event_display_png(const char *filename, double x, double y);
 extern void screen_event_display_surface(void *surface, double x, double y);
 extern void screen_event_display_surface_region(void *surface, double left, double top, double width, double height, double x, double y);

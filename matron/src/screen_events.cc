@@ -27,27 +27,64 @@ static void handle_screen_event(struct screen_event_data *ev);
 static pthread_t screen_event_thread;
 static pthread_mutex_t screen_q_lock;
 static pthread_cond_t screen_q_nonempty;
+static pthread_cond_t screen_q_nonfull;
+static bool screen_events_initialized = false;
+static bool screen_events_accepting = false;
 
-// clear out the Q, then populate it with a visible white flash
-// call with the Q locked
-static void screen_events_emergency_clear();
+static void screen_event_release_surface(void *surface) {
+    screen_surface_free((screen_surface_t *)surface);
+}
+
+static void screen_event_release_context(void *context) {
+    screen_context_free((screen_context_t *)context);
+}
 
 void screen_events_init() {
+    if (screen_events_initialized)
+        return;
+
+    screen_q_wr = 0;
+    screen_q_rd = 0;
+    memset(screen_q, 0, sizeof(screen_q));
+    pthread_mutex_init(&screen_q_lock, NULL);
     pthread_cond_init(&screen_q_nonempty, NULL);
+    pthread_cond_init(&screen_q_nonfull, NULL);
+    screen_events_accepting = true;
     if (pthread_create(&screen_event_thread, NULL, screen_event_loop, 0)) {
         fprintf(stderr, "SCREEN: error creating thread\n");
+        screen_events_accepting = false;
+        pthread_cond_destroy(&screen_q_nonfull);
+        pthread_cond_destroy(&screen_q_nonempty);
+        pthread_mutex_destroy(&screen_q_lock);
+        return;
     }
+    screen_events_initialized = true;
+}
+
+void screen_events_deinit() {
+    if (!screen_events_initialized)
+        return;
+
+    pthread_mutex_lock(&screen_q_lock);
+    screen_events_accepting = false;
+    pthread_cond_broadcast(&screen_q_nonempty);
+    pthread_cond_broadcast(&screen_q_nonfull);
+    pthread_mutex_unlock(&screen_q_lock);
+
+    pthread_join(screen_event_thread, NULL);
+    pthread_cond_destroy(&screen_q_nonfull);
+    pthread_cond_destroy(&screen_q_nonempty);
+    pthread_mutex_destroy(&screen_q_lock);
+    screen_events_initialized = false;
 }
 
 void screen_event_data_init(struct screen_event_data *ev) {
-    ev->type = SCREEN_EVENT_NONE;
-    ev->buf = NULL;
+    memset(ev, 0, sizeof(*ev));
 }
 
 void screen_event_data_free(struct screen_event_data *ev) {
-    if (ev->buf != NULL) {
-        free(ev->buf);
-    }
+    if (ev->buf != NULL && ev->buf_free != NULL)
+        ev->buf_free(ev->buf);
     screen_event_data_init(ev);
 }
 
@@ -59,16 +96,37 @@ static void screen_event_data_move(struct screen_event_data *dst, struct screen_
 
 // call from any thread; locks Q (blocking)
 void screen_event_data_push(struct screen_event_data *src) {
+    if (!screen_events_initialized) {
+        screen_event_data_free(src);
+        return;
+    }
+
     pthread_mutex_lock(&screen_q_lock);
+    int next = (screen_q_wr + 1) & SCREEN_Q_MASK;
+    while (screen_events_accepting && next == screen_q_rd) {
+        pthread_cond_wait(&screen_q_nonfull, &screen_q_lock);
+        next = (screen_q_wr + 1) & SCREEN_Q_MASK;
+    }
+    if (!screen_events_accepting) {
+        pthread_mutex_unlock(&screen_q_lock);
+        screen_event_data_free(src);
+        return;
+    }
+
+    // Consecutive updates have identical observable output. Keeping only one
+    // prevents redundant paint work without reordering intervening drawing.
+    if (src->type == SCREEN_EVENT_UPDATE && screen_q_wr != screen_q_rd) {
+        const int previous = (screen_q_wr - 1) & SCREEN_Q_MASK;
+        if (screen_q[previous].type == SCREEN_EVENT_UPDATE) {
+            pthread_mutex_unlock(&screen_q_lock);
+            screen_event_data_free(src);
+            return;
+        }
+    }
+
     struct screen_event_data *dst = &(screen_q[screen_q_wr]);
     screen_event_data_move(dst, src);
-    screen_q_wr = (screen_q_wr + 1) & SCREEN_Q_MASK;
-    // if these indices become equal here, we've filled the queue
-    if (screen_q_wr == screen_q_rd) {
-        // TODO: post some kind of error to lua?
-        fprintf(stderr, "warning: screen event Q full! \n");
-        screen_events_emergency_clear();
-    }
+    screen_q_wr = next;
     pthread_cond_signal(&screen_q_nonempty);
     pthread_mutex_unlock(&screen_q_lock);
 }
@@ -84,16 +142,22 @@ void *screen_event_loop(void *x) {
     (void)x;
     struct screen_event_data ev;
     screen_event_data_init(&ev);
-    while (1) {
+    for (;;) {
         pthread_mutex_lock(&screen_q_lock);
-        while (screen_q_rd == screen_q_wr) {
+        while (screen_events_accepting && screen_q_rd == screen_q_wr) {
             pthread_cond_wait(&screen_q_nonempty, &screen_q_lock);
         }
-        assert(screen_q_rd != screen_q_wr);
+        if (screen_q_rd == screen_q_wr) {
+            pthread_mutex_unlock(&screen_q_lock);
+            break;
+        }
         screen_event_data_pop(&ev);
+        pthread_cond_signal(&screen_q_nonfull);
         pthread_mutex_unlock(&screen_q_lock);
         handle_screen_event(&ev);
     }
+    screen_event_data_free(&ev);
+    return NULL;
 }
 
 void handle_screen_event(struct screen_event_data *ev) {
@@ -188,39 +252,33 @@ void handle_screen_event(struct screen_event_data *ev) {
     case SCREEN_EVENT_EXPORT_PNG:
         screen_export_png((const char *)ev->buf);
         break;
+    case SCREEN_EVENT_EXPORT_SCREENSHOT:
+        screen_export_screenshot((const char *)ev->buf);
+        break;
     case SCREEN_EVENT_DISPLAY_PNG:
         screen_display_png((const char *)ev->buf, ev->payload.bd.d1, ev->payload.bd.d2);
         break;
     case SCREEN_EVENT_DISPLAY_SURFACE:
         screen_surface_display((screen_surface_t *)ev->buf, ev->payload.bd.d1, ev->payload.bd.d2);
-        ev->buf = NULL;
         break;
     case SCREEN_EVENT_DISPLAY_SURFACE_REGION:
         screen_surface_display_region((screen_surface_t *)ev->buf, ev->payload.d.d1, ev->payload.d.d2, ev->payload.d.d3, ev->payload.d.d4, ev->payload.d.d5, ev->payload.d.d6);
-        ev->buf = NULL;
         break;
     case SCREEN_EVENT_SURFACE_FREE:
-        screen_surface_free((screen_surface_t *)ev->buf);
-        ev->buf = NULL;
         break;
     case SCREEN_EVENT_SURFACE_GET_EXTENTS:
         screen_surface_get_extents((screen_surface_t *)ev->buf);
-        ev->buf = NULL;
         break;
     case SCREEN_EVENT_CONTEXT_FREE:
-        screen_context_free((screen_context_t *)ev->buf);
-        ev->buf = NULL;
         break;
     case SCREEN_EVENT_CONTEXT_NEW:
         screen_context_new((screen_surface_t *)ev->buf);
-        ev->buf = NULL;
         break;
     case SCREEN_EVENT_CONTEXT_GET_CURRENT:
         screen_context_get_current();
         break;
     case SCREEN_EVENT_CONTEXT_SET:
         screen_context_set((screen_context_t *)ev->buf);
-        ev->buf = NULL;
         break;
     case SCREEN_EVENT_CONTEXT_SET_PRIMARY:
         screen_context_set_primary();
@@ -270,6 +328,7 @@ static inline void screen_event_copy_string(struct screen_event_data *ev, const 
     size_t nb = strlen(s) + 1;
     ev->buf = malloc(nb);
     memcpy(ev->buf, s, nb);
+    ev->buf_free = free;
     ev->payload.b.nb = nb;
 }
 
@@ -520,6 +579,14 @@ void screen_event_export_png(const char *s) {
     screen_event_data_push(&ev);
 }
 
+void screen_event_export_screenshot(const char *s) {
+    struct screen_event_data ev;
+    screen_event_data_init(&ev);
+    ev.type = SCREEN_EVENT_EXPORT_SCREENSHOT;
+    screen_event_copy_string(&ev, s);
+    screen_event_data_push(&ev);
+}
+
 void screen_event_display_png(const char *s, double x, double y) {
     struct screen_event_data ev;
     screen_event_data_init(&ev);
@@ -534,7 +601,8 @@ void screen_event_display_surface(void *surface, double x, double y) {
     struct screen_event_data ev;
     screen_event_data_init(&ev);
     ev.type = SCREEN_EVENT_DISPLAY_SURFACE;
-    ev.buf = surface;
+    ev.buf = screen_surface_reference((screen_surface_t *)surface);
+    ev.buf_free = screen_event_release_surface;
     ev.payload.bd.d1 = x;
     ev.payload.bd.d2 = y;
     screen_event_data_push(&ev);
@@ -544,7 +612,8 @@ void screen_event_display_surface_region(void *surface, double left, double top,
     struct screen_event_data ev;
     screen_event_data_init(&ev);
     ev.type = SCREEN_EVENT_DISPLAY_SURFACE_REGION;
-    ev.buf = surface;
+    ev.buf = screen_surface_reference((screen_surface_t *)surface);
+    ev.buf_free = screen_event_release_surface;
     ev.payload.d.d1 = left;
     ev.payload.d.d2 = top;
     ev.payload.d.d3 = width;
@@ -559,6 +628,7 @@ void screen_event_surface_free(void *surface) {
     screen_event_data_init(&ev);
     ev.type = SCREEN_EVENT_SURFACE_FREE;
     ev.buf = surface;
+    ev.buf_free = screen_event_release_surface;
     screen_event_data_push(&ev);
 }
 
@@ -566,7 +636,8 @@ void screen_event_surface_get_extents(void *surface) {
     struct screen_event_data ev;
     screen_event_data_init(&ev);
     ev.type = SCREEN_EVENT_SURFACE_GET_EXTENTS;
-    ev.buf = surface;
+    ev.buf = screen_surface_reference((screen_surface_t *)surface);
+    ev.buf_free = screen_event_release_surface;
     screen_event_data_push(&ev);
 }
 
@@ -575,6 +646,7 @@ void screen_event_context_free(void *screen_context) {
     screen_event_data_init(&ev);
     ev.type = SCREEN_EVENT_CONTEXT_FREE;
     ev.buf = screen_context;
+    ev.buf_free = screen_event_release_context;
     screen_event_data_push(&ev);
 }
 
@@ -582,7 +654,8 @@ void screen_event_context_new(void *target) {
     struct screen_event_data ev;
     screen_event_data_init(&ev);
     ev.type = SCREEN_EVENT_CONTEXT_NEW;
-    ev.buf = target;
+    ev.buf = screen_surface_reference((screen_surface_t *)target);
+    ev.buf_free = screen_event_release_surface;
     screen_event_data_push(&ev);
 }
 
@@ -627,6 +700,7 @@ void screen_event_poke(int x, int y, int w, int h, unsigned char *buf) {
     ev.payload.bd.nb = nb;
     ev.buf = malloc(nb);
     memcpy(ev.buf, buf, nb);
+    ev.buf_free = free;
     ev.payload.bi.i1 = x;
     ev.payload.bi.i2 = y;
     ev.payload.bi.i3 = w;
@@ -696,29 +770,4 @@ void screen_event_invert(int i) {
     ev.type = SCREEN_EVENT_INVERT;
     ev.payload.i.i1 = i;
     screen_event_data_push(&ev);
-}
-
-// assumption: Q is locked
-void screen_events_emergency_clear() {
-    struct screen_event_data *ev;
-    for (int i = 0; i < SCREEN_Q_SIZE; ++i) {
-        ev = &screen_q[i];
-        screen_event_data_free(ev);
-    }
-    screen_q[0].type = SCREEN_EVENT_CLEAR;
-    screen_q[1].type = SCREEN_EVENT_LEVEL;
-    screen_q[1].payload.i.i1 = 15;
-    screen_q[2].type = SCREEN_EVENT_RECT;
-    screen_q[2].payload.d.d1 = 1;
-    screen_q[2].payload.d.d2 = 1;
-    screen_q[2].payload.d.d3 = 62;
-    screen_q[2].payload.d.d4 = 126;
-    screen_q[3].type = SCREEN_EVENT_UPDATE;
-    screen_q[4].type = SCREEN_EVENT_UPDATE;
-    screen_q[5].type = SCREEN_EVENT_UPDATE;
-    screen_q[6].type = SCREEN_EVENT_UPDATE;
-    screen_q[7].type = SCREEN_EVENT_UPDATE;
-
-    screen_q_wr = 8;
-    screen_q_rd = 0;
 }

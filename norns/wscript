@@ -18,6 +18,8 @@ def build(bld):
         '../matron/src/hardware/platform.cc',
         '../matron/src/hardware/screen.cc',
         '../matron/src/hardware/screen/sharp_memory_outline_atlas.cc',
+        '../matron/src/hardware/screen/sharp_memory_semantics.cc',
+        '../matron/src/hardware/screen/sharp_memory_dither.cc',
         '../matron/src/hardware/stat.cc',
         '../matron/src/hardware/input/gpio.cc',
         '../matron/src/args.cc',
@@ -46,7 +48,6 @@ def build(bld):
     if bld.env.NORNS_CM5:
         matron_sources += [
             '../matron/src/hardware/screen/sharp_memory.cc',
-            '../matron/src/hardware/screen/sharp_memory_dither.cc',
             '../matron/src/hardware/screen/sharp_memory_protocol.cc',
             '../matron/src/hardware/screen/ssd1322_stub.cc',
         ]

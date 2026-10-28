@@ -60,6 +60,7 @@ typedef struct {
 
 extern screen_surface_t *screen_surface_new(double width, double height);
 extern screen_surface_t *screen_surface_load_png(const char *filename);
+extern screen_surface_t *screen_surface_reference(screen_surface_t *s);
 extern void screen_surface_free(screen_surface_t *s);
 extern void screen_surface_get_extents(screen_surface_t *s);
 extern void screen_surface_display(screen_surface_t *s, double x, double y);

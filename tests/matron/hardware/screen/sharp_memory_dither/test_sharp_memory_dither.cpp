@@ -10,6 +10,16 @@ TEST_CASE("Sharp Memory LCD luminance uses perceptual channel weights") {
     CHECK(sharp_memory_luminance(0xff0000ff) == 31);
 }
 
+TEST_CASE("Sharp Memory luminance maps to the nearest norns level") {
+    for (uint8_t level = 0; level < 16; ++level)
+        CHECK(sharp_memory_level((uint8_t)(level * 17)) == level);
+
+    CHECK(sharp_memory_level(8) == 0);
+    CHECK(sharp_memory_level(9) == 1);
+    CHECK(sharp_memory_level(246) == 14);
+    CHECK(sharp_memory_level(247) == 15);
+}
+
 TEST_CASE("Bayer dithering preserves black, white, and half intensity") {
     int half_white = 0;
     int half_white_inverted = 0;

@@ -21,14 +21,15 @@
 #include "events.h"
 #include "hardware/io.h"
 #include "hardware/screen.h"
+#include "hardware/screen/sharp_memory_dither.h"
 #include "hardware/screen/sharp_memory_outline_atlas.h"
+#include "hardware/screen/sharp_memory_semantics.h"
 #include "hardware/screen/ssd1322.h"
 #include "screen.h"
 #include "screen_results.h"
 
 #define NUM_FONTS 69
 #define NUM_OPS 29
-#define SEMANTIC_STROKE_SCALE 3
 
 static char font_path[NUM_FONTS][32];
 
@@ -77,7 +78,9 @@ static cairo_surface_t *semantic_stroke_surface;
 static cairo_t *semantic_stroke_cr;
 static cairo_surface_t *semantic_stroke_coverage_surface;
 static cairo_t *semantic_stroke_coverage_cr;
+static cairo_surface_t *semantic_composite_surface;
 static bool semantic_surfaces_valid;
+static screen_semantic_config_t semantic_config = {3, true, 8};
 static uint8_t semantic_stroke_level_current;
 static std::vector<uint8_t> semantic_stroke_level_stack;
 static bool surface_may_have_color = false;
@@ -91,7 +94,7 @@ static void init_font_faces(void);
 
 static bool semantic_text_active(void) {
     return cr == cr_primary && semantic_text_cr != NULL && semantic_stroke_cr != NULL &&
-           semantic_stroke_coverage_cr != NULL;
+           semantic_stroke_coverage_cr != NULL && semantic_composite_surface != NULL;
 }
 
 static bool semantic_surfaces_requested(void) {
@@ -100,8 +103,14 @@ static bool semantic_surfaces_requested(void) {
         if (io->ops->type != IO_SCREEN)
             continue;
         screen_ops_t *screen_ops = (screen_ops_t *)io->ops;
-        if (screen_ops->bind_semantics != NULL)
+        if (screen_ops->bind_semantics != NULL) {
+            semantic_config = {3, true, 8};
+            if (screen_ops->get_semantic_config != NULL)
+                screen_ops->get_semantic_config((matron_fb_t *)io, &semantic_config);
+            if (semantic_config.physical_scale == 0)
+                semantic_config.physical_scale = 3;
             return true;
+        }
     }
     return false;
 }
@@ -121,20 +130,19 @@ static void semantic_text_set_hard_antialias(void) {
 }
 
 static void semantic_text_clear(void) {
-    cairo_save(semantic_text_cr);
-    cairo_set_operator(semantic_text_cr, CAIRO_OPERATOR_CLEAR);
-    cairo_paint(semantic_text_cr);
-    cairo_restore(semantic_text_cr);
+    // These are per-frame semantic buffers, not retained drawing layers.
+    // Clear their image storage directly so context-local state (including a
+    // clip, operator, or Cairo error) cannot leave stale high-level ink behind.
+    sharp_memory_semantic_surface_clear(semantic_text_surface);
+    sharp_memory_semantic_surface_clear(semantic_stroke_surface);
+    sharp_memory_semantic_surface_clear(semantic_stroke_coverage_surface);
+    sharp_memory_semantic_surface_clear(semantic_composite_surface);
 
-    cairo_save(semantic_stroke_cr);
-    cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_CLEAR);
-    cairo_paint(semantic_stroke_cr);
-    cairo_restore(semantic_stroke_cr);
-
-    cairo_save(semantic_stroke_coverage_cr);
-    cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_CLEAR);
-    cairo_paint(semantic_stroke_coverage_cr);
-    cairo_restore(semantic_stroke_coverage_cr);
+    // A new screen frame must not inherit unfinished paths from the previous
+    // one. Consuming operations will rebuild sidecar paths from primary Cairo.
+    cairo_new_path(semantic_text_cr);
+    cairo_new_path(semantic_stroke_cr);
+    cairo_new_path(semantic_stroke_coverage_cr);
 }
 
 static uint8_t semantic_stroke_level(void) {
@@ -166,27 +174,6 @@ static void semantic_replace_paths(const cairo_path_t *path) {
     semantic_replace_path(semantic_stroke_coverage_cr, path);
 }
 
-static void semantic_stroke_append_and_stroke(const cairo_path_t *path,
-                                              double width,
-                                              double dash,
-                                              double gap,
-                                              cairo_operator_t op) {
-    cairo_new_path(semantic_stroke_cr);
-    cairo_append_path(semantic_stroke_cr, path);
-    cairo_set_operator(semantic_stroke_cr, op);
-    cairo_set_line_width(semantic_stroke_cr, width / SEMANTIC_STROKE_SCALE);
-    if (dash > 0.0) {
-        const double dashes[2] = {
-            dash / SEMANTIC_STROKE_SCALE,
-            gap / SEMANTIC_STROKE_SCALE,
-        };
-        cairo_set_dash(semantic_stroke_cr, dashes, 2, 0.0);
-    } else {
-        cairo_set_dash(semantic_stroke_cr, NULL, 0, 0.0);
-    }
-    cairo_stroke(semantic_stroke_cr);
-}
-
 static void semantic_stroke_draw(uint8_t level) {
     cairo_path_t *path = cairo_copy_path(semantic_stroke_cr);
     cairo_path_t *flat_path = cairo_copy_path_flat(semantic_stroke_cr);
@@ -203,76 +190,106 @@ static void semantic_stroke_draw(uint8_t level) {
     cairo_user_to_device_distance(semantic_stroke_cr, &vertical_x, &vertical_y);
     const double track_width_px =
         (hypot(horizontal_x, horizontal_y) + hypot(vertical_x, vertical_y)) /
-        (2.0 * SEMANTIC_STROKE_SCALE);
+        (2.0 * semantic_config.physical_scale);
 
-    cairo_save(semantic_stroke_cr);
-    cairo_set_source_rgba(semantic_stroke_cr, 1.0, 1.0, 1.0, 1.0);
-
-    // Remove an older semantic stroke wherever the canonical Cairo stroke is
-    // painting. The new brightness-specific layers are then built back up.
-    semantic_stroke_append_and_stroke(
-        path, api_width * SEMANTIC_STROKE_SCALE, 0.0, 0.0, CAIRO_OPERATOR_CLEAR);
-    cairo_restore(semantic_stroke_cr);
+    // These two surfaces are operation-local masks. Painter order is retained
+    // in semantic_composite_surface, never inferred from mask priority.
+    sharp_memory_semantic_surface_clear(semantic_stroke_surface);
+    sharp_memory_semantic_surface_clear(semantic_stroke_coverage_surface);
 
     sharp_memory_outline_render(
         semantic_stroke_cr, flat_path, semantic_stroke_surface, level, track_width_px);
 
-    // Claim the complete stroke footprint at canonical 128x64 resolution.
-    // The backend expands each touched logical pixel with the same mapping as
-    // the framebuffer, so half-pixel paths and antialiasing cannot drift away
-    // from the physical outline atlas.
     cairo_save(semantic_stroke_coverage_cr);
     cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_OVER);
     cairo_set_source_rgba(semantic_stroke_coverage_cr, 1.0, 1.0, 1.0, 1.0);
     cairo_stroke(semantic_stroke_coverage_cr);
     cairo_restore(semantic_stroke_coverage_cr);
 
+    // First claim the canonical stroke footprint as background, then place
+    // the one-pixel physical tracks on top of it.
+    sharp_memory_semantic_apply_logical_mask(semantic_composite_surface,
+                                             semantic_stroke_coverage_surface,
+                                             SHARP_MEMORY_SEMANTIC_BACKGROUND,
+                                             semantic_config.physical_scale,
+                                             0,
+                                             0,
+                                             1);
+    sharp_memory_semantic_apply_physical_mask(semantic_composite_surface,
+                                              semantic_stroke_surface,
+                                              SHARP_MEMORY_SEMANTIC_STROKE,
+                                              128);
+
+    cairo_new_path(semantic_text_cr);
     cairo_new_path(semantic_stroke_cr);
     cairo_path_destroy(flat_path);
     cairo_path_destroy(path);
 }
 
-static void semantic_stroke_erase_path(bool stroke) {
-    cairo_save(semantic_stroke_cr);
-    cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_CLEAR);
-    if (stroke)
-        cairo_stroke(semantic_stroke_cr);
-    else
-        cairo_fill(semantic_stroke_cr);
-    cairo_restore(semantic_stroke_cr);
-
+static void semantic_composite_erase_path(bool stroke) {
+    sharp_memory_semantic_surface_clear(semantic_stroke_coverage_surface);
     cairo_save(semantic_stroke_coverage_cr);
-    cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_CLEAR);
+    cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_OVER);
+    cairo_set_source_rgba(semantic_stroke_coverage_cr, 1.0, 1.0, 1.0, 1.0);
     if (stroke)
         cairo_stroke(semantic_stroke_coverage_cr);
     else
         cairo_fill(semantic_stroke_coverage_cr);
     cairo_restore(semantic_stroke_coverage_cr);
+
+    sharp_memory_semantic_erase_logical_mask(semantic_composite_surface,
+                                             semantic_stroke_coverage_surface,
+                                             semantic_config.physical_scale,
+                                             1);
+    cairo_new_path(semantic_text_cr);
+    cairo_new_path(semantic_stroke_cr);
 }
 
 static void semantic_show_text(const char *text) {
-    cairo_show_text(semantic_text_cr, text);
-    cairo_save(semantic_stroke_cr);
-    cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_CLEAR);
-    cairo_show_text(semantic_stroke_cr, text);
-    cairo_restore(semantic_stroke_cr);
+    const uint8_t level = semantic_stroke_level();
+    sharp_memory_semantic_surface_clear(semantic_text_surface);
+    sharp_memory_semantic_surface_clear(semantic_stroke_coverage_surface);
 
-    // Text has its own hard semantic mask. Clear logical stroke ownership
-    // with the same hard glyph raster instead of the coverage context's
-    // canonical path antialiasing mode.
-    cairo_font_options_t *font_options = cairo_font_options_create();
-    cairo_font_options_set_antialias(font_options, CAIRO_ANTIALIAS_NONE);
+    cairo_show_text(semantic_text_cr, text);
     cairo_save(semantic_stroke_coverage_cr);
-    cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_CLEAR);
-    cairo_set_antialias(semantic_stroke_coverage_cr, CAIRO_ANTIALIAS_NONE);
-    cairo_set_font_options(semantic_stroke_coverage_cr, font_options);
+    cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_OVER);
+    cairo_set_source_rgba(semantic_stroke_coverage_cr, 1.0, 1.0, 1.0, 1.0);
     cairo_show_text(semantic_stroke_coverage_cr, text);
     cairo_restore(semantic_stroke_coverage_cr);
-    cairo_font_options_destroy(font_options);
 
-    // Font hinting can produce a slightly different advance at the stroke
-    // layer's 3x CTM. Keep all sidecar current points locked to canonical Cairo
-    // so later relative drawing commands cannot accumulate drift.
+    // Suppress the canonical antialiased halo before adding the hard glyph.
+    sharp_memory_semantic_apply_logical_mask(semantic_composite_surface,
+                                             semantic_stroke_coverage_surface,
+                                             SHARP_MEMORY_SEMANTIC_BACKGROUND,
+                                             semantic_config.physical_scale,
+                                             0,
+                                             0,
+                                             1);
+
+    const uint8_t shadows = semantic_config.text_shadow
+                                ? sharp_memory_text_shadow_count(
+                                      (uint8_t)(level * 17),
+                                      semantic_config.text_second_shadow_level)
+                                : 0;
+    for (int offset = shadows; offset >= 1; --offset) {
+        sharp_memory_semantic_apply_logical_mask(semantic_composite_surface,
+                                                 semantic_text_surface,
+                                                 SHARP_MEMORY_SEMANTIC_BACKGROUND,
+                                                 semantic_config.physical_scale,
+                                                 offset,
+                                                 offset,
+                                                 128);
+    }
+    sharp_memory_semantic_apply_logical_mask(semantic_composite_surface,
+                                             semantic_text_surface,
+                                             SHARP_MEMORY_SEMANTIC_TEXT,
+                                             semantic_config.physical_scale,
+                                             0,
+                                             0,
+                                             128);
+
+    // Keep all sidecar current points locked to canonical Cairo so later
+    // relative drawing commands cannot accumulate font-hinting drift.
     double x, y;
     cairo_get_current_point(cr, &x, &y);
     cairo_move_to(semantic_text_cr, x, y);
@@ -280,73 +297,36 @@ static void semantic_show_text(const char *text) {
     cairo_move_to(semantic_stroke_coverage_cr, x, y);
 }
 
-static void semantic_text_erase_path(bool stroke) {
-    cairo_save(semantic_text_cr);
-    cairo_set_operator(semantic_text_cr, CAIRO_OPERATOR_CLEAR);
-    if (stroke)
-        cairo_stroke(semantic_text_cr);
-    else
-        cairo_fill(semantic_text_cr);
-    cairo_restore(semantic_text_cr);
-}
-
-static void semantic_text_erase_rectangle(double x, double y, double width, double height) {
-    cairo_save(semantic_text_cr);
-    cairo_set_operator(semantic_text_cr, CAIRO_OPERATOR_CLEAR);
-    cairo_rectangle(semantic_text_cr, x, y, width, height);
-    cairo_fill(semantic_text_cr);
-    cairo_restore(semantic_text_cr);
-
-    cairo_save(semantic_stroke_cr);
-    cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_CLEAR);
-    cairo_rectangle(semantic_stroke_cr, x, y, width, height);
-    cairo_fill(semantic_stroke_cr);
-    cairo_restore(semantic_stroke_cr);
-
+static void semantic_composite_erase_rectangle(double x,
+                                               double y,
+                                               double width,
+                                               double height) {
+    sharp_memory_semantic_surface_clear(semantic_stroke_coverage_surface);
     cairo_save(semantic_stroke_coverage_cr);
-    cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_CLEAR);
+    cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_OVER);
+    cairo_set_source_rgba(semantic_stroke_coverage_cr, 1.0, 1.0, 1.0, 1.0);
     cairo_rectangle(semantic_stroke_coverage_cr, x, y, width, height);
     cairo_fill(semantic_stroke_coverage_cr);
     cairo_restore(semantic_stroke_coverage_cr);
-}
 
-static void semantic_text_erase_raw_rectangle(double x, double y, double width, double height) {
-    cairo_path_t *path = cairo_copy_path(semantic_text_cr);
+    sharp_memory_semantic_erase_logical_mask(semantic_composite_surface,
+                                             semantic_stroke_coverage_surface,
+                                             semantic_config.physical_scale,
+                                             1);
     cairo_new_path(semantic_text_cr);
-    cairo_save(semantic_text_cr);
-    cairo_identity_matrix(semantic_text_cr);
-    cairo_set_operator(semantic_text_cr, CAIRO_OPERATOR_CLEAR);
-    cairo_rectangle(semantic_text_cr, x, y, width, height);
-    cairo_fill(semantic_text_cr);
-    cairo_restore(semantic_text_cr);
-    cairo_append_path(semantic_text_cr, path);
-    cairo_path_destroy(path);
-
-    path = cairo_copy_path(semantic_stroke_cr);
     cairo_new_path(semantic_stroke_cr);
-    cairo_save(semantic_stroke_cr);
-    cairo_identity_matrix(semantic_stroke_cr);
-    cairo_set_operator(semantic_stroke_cr, CAIRO_OPERATOR_CLEAR);
-    cairo_rectangle(semantic_stroke_cr,
-                    x * SEMANTIC_STROKE_SCALE,
-                    y * SEMANTIC_STROKE_SCALE,
-                    width * SEMANTIC_STROKE_SCALE,
-                    height * SEMANTIC_STROKE_SCALE);
-    cairo_fill(semantic_stroke_cr);
-    cairo_restore(semantic_stroke_cr);
-    cairo_append_path(semantic_stroke_cr, path);
-    cairo_path_destroy(path);
+}
 
-    path = cairo_copy_path(semantic_stroke_coverage_cr);
-    cairo_new_path(semantic_stroke_coverage_cr);
-    cairo_save(semantic_stroke_coverage_cr);
-    cairo_identity_matrix(semantic_stroke_coverage_cr);
-    cairo_set_operator(semantic_stroke_coverage_cr, CAIRO_OPERATOR_CLEAR);
-    cairo_rectangle(semantic_stroke_coverage_cr, x, y, width, height);
-    cairo_fill(semantic_stroke_coverage_cr);
-    cairo_restore(semantic_stroke_coverage_cr);
-    cairo_append_path(semantic_stroke_coverage_cr, path);
-    cairo_path_destroy(path);
+static void semantic_composite_erase_raw_rectangle(double x,
+                                                   double y,
+                                                   double width,
+                                                   double height) {
+    const int scale = semantic_config.physical_scale;
+    sharp_memory_semantic_erase_physical_rectangle(semantic_composite_surface,
+                                                   (int32_t)floor(x * scale),
+                                                   (int32_t)floor(y * scale),
+                                                   (int32_t)ceil(width * scale),
+                                                   (int32_t)ceil(height * scale));
 }
 
 //---------------------------------------
@@ -362,15 +342,23 @@ void screen_init(void) {
         semantic_text_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 128, 64);
         semantic_text_cr = cairo_create(semantic_text_surface);
         semantic_stroke_surface = cairo_image_surface_create(
-            CAIRO_FORMAT_ARGB32, 128 * SEMANTIC_STROKE_SCALE, 64 * SEMANTIC_STROKE_SCALE);
+            CAIRO_FORMAT_ARGB32,
+            128 * semantic_config.physical_scale,
+            64 * semantic_config.physical_scale);
         semantic_stroke_cr = cairo_create(semantic_stroke_surface);
         semantic_stroke_coverage_surface =
             cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 128, 64);
         semantic_stroke_coverage_cr = cairo_create(semantic_stroke_coverage_surface);
-        // Map logical Cairo geometry directly onto the exact 3x pixel grid.
+        semantic_composite_surface = cairo_image_surface_create(
+            CAIRO_FORMAT_ARGB32,
+            128 * semantic_config.physical_scale,
+            64 * semantic_config.physical_scale);
+        // Map logical Cairo geometry directly onto the physical pixel grid.
         // In particular, the half-integer coordinates used for crisp norns
         // strokes must remain centered inside their logical 3x3 tiles.
-        cairo_scale(semantic_stroke_cr, SEMANTIC_STROKE_SCALE, SEMANTIC_STROKE_SCALE);
+        cairo_scale(semantic_stroke_cr,
+                    semantic_config.physical_scale,
+                    semantic_config.physical_scale);
         semantic_text_clear();
         semantic_text_set_hard_antialias();
     }
@@ -601,6 +589,7 @@ void init_font_faces(void) {
         fb_ops->bind(fb, surface);
         if (fb_ops->bind_semantics != NULL) {
             screen_semantics_t semantics;
+            semantics.composite = semantic_composite_surface;
             semantics.text = semantic_text_surface;
             semantics.stroke = semantic_stroke_surface;
             semantics.stroke_coverage = semantic_stroke_coverage_surface;
@@ -612,6 +601,10 @@ void init_font_faces(void) {
 
 void screen_deinit(void) {
     semantic_stroke_level_stack.clear();
+    if (semantic_composite_surface != NULL) {
+        cairo_surface_destroy(semantic_composite_surface);
+        semantic_composite_surface = NULL;
+    }
     if (semantic_stroke_coverage_cr != NULL) {
         cairo_destroy(semantic_stroke_coverage_cr);
         semantic_stroke_coverage_cr = NULL;
@@ -779,8 +772,18 @@ void screen_gamma(double g) {
 }
 
 void screen_invert(int inverted) {
-    if (screen_has_io_backend())
+    if (screen_has_io_backend()) {
+        matron_io_t *io;
+        TAILQ_FOREACH(io, &io_queue, entries) {
+            if (io->ops->type != IO_SCREEN)
+                continue;
+            matron_fb_t *fb = (matron_fb_t *)io;
+            screen_ops_t *fb_ops = (screen_ops_t *)io->ops;
+            if (fb_ops->set_invert != NULL)
+                fb_ops->set_invert(fb, inverted != 0);
+        }
         return;
+    }
     ssd1322_set_display_mode((inverted != 0) ? SSD1322_DISPLAY_MODE_INVERT : SSD1322_DISPLAY_MODE_NORMAL);
 }
 
@@ -956,7 +959,6 @@ void screen_stroke(void) {
         // can never leak retained geometry into a later semantic stroke.
         if (primary_path != NULL && primary_path->status == CAIRO_STATUS_SUCCESS)
             semantic_replace_paths(primary_path);
-        semantic_text_erase_path(true);
         semantic_stroke_draw(semantic_level);
     }
     if (primary_path != NULL)
@@ -970,8 +972,7 @@ void screen_fill(void) {
     if (erase_semantics) {
         if (primary_path != NULL && primary_path->status == CAIRO_STATUS_SUCCESS)
             semantic_replace_paths(primary_path);
-        semantic_text_erase_path(false);
-        semantic_stroke_erase_path(false);
+        semantic_composite_erase_path(false);
     }
     if (primary_path != NULL)
         cairo_path_destroy(primary_path);
@@ -986,6 +987,7 @@ void screen_text(const char *s) {
 void screen_clear(void) {
     cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
     cairo_paint(cr);
+    cairo_new_path(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
     if (semantic_text_active()) {
         semantic_text_clear();
@@ -1057,6 +1059,8 @@ void screen_display_png(const char *filename, double x, double y) {
 
     if (cairo_surface_status(image)) {
         fprintf(stderr, "display_png: %s\n", cairo_status_to_string(cairo_surface_status(image)));
+        cairo_surface_destroy(image);
+        image = NULL;
         return;
     }
 
@@ -1072,31 +1076,42 @@ void screen_display_png(const char *filename, double x, double y) {
     cairo_surface_destroy(image);
     cairo_restore(cr);
     if (semantic_text_active())
-        semantic_text_erase_rectangle(x, y, img_w, img_h);
+        semantic_composite_erase_rectangle(x, y, img_w, img_h);
 }
 
 void screen_peek(int x, int y, int w, int h) {
     w = (w <= (128 - x)) ? w : (128 - x);
     h = (h <= (64 - y)) ? h : (64 - y);
+    union screen_results_data *results = screen_results_data_new(SCREEN_RESULTS_PEEK);
     char *buf = (char *)malloc(w * h);
     if (!buf) {
+        results->peek.w = 0;
+        results->peek.h = 0;
+        results->peek.buf = NULL;
+        screen_results_post(results);
         return;
     }
     cairo_surface_flush(surface);
-    uint32_t *data = (uint32_t *)cairo_image_surface_get_data(surface);
+    const uint8_t *data = cairo_image_surface_get_data(surface);
     if (!data) {
         fprintf(stderr, "ERROR: screen_peek: no data\n");
         free(buf);
+        results->peek.w = 0;
+        results->peek.h = 0;
+        results->peek.buf = NULL;
+        screen_results_post(results);
         return;
     }
+    const int stride = cairo_image_surface_get_stride(surface);
     char *p = buf;
     for (int j = y; j < y + h; j++) {
         for (int i = x; i < x + w; i++) {
-            *p = data[j * 128 + i] & 0xF;
+            uint32_t argb;
+            memcpy(&argb, data + (size_t)j * stride + i * 4, sizeof(argb));
+            *p = (char)sharp_memory_level(sharp_memory_luminance(argb));
             p++;
         }
     }
-    union screen_results_data *results = screen_results_data_new(SCREEN_RESULTS_PEEK);
     results->peek.w = w;
     results->peek.h = h;
     results->peek.buf = buf;
@@ -1106,25 +1121,26 @@ void screen_peek(int x, int y, int w, int h) {
 void screen_poke(int x, int y, int w, int h, unsigned char *buf) {
     w = (w <= (128 - x)) ? w : (128 - x);
     h = (h <= (64 - y)) ? h : (64 - y);
-    // NB: peek/poke do not actually access the CR,
-    // but we do want to avoid torn values
-    uint32_t *data = (uint32_t *)cairo_image_surface_get_data(surface);
+    cairo_surface_flush(surface);
+    uint8_t *data = cairo_image_surface_get_data(surface);
     if (!data) {
         return;
     }
+    const int stride = cairo_image_surface_get_stride(surface);
     uint8_t *p = buf;
-    uint32_t pixel;
     for (int j = y; j < y + h; j++) {
         for (int i = x; i < x + w; i++) {
-            pixel = *p;
-            pixel = pixel | (pixel << 4);
-            data[j * 128 + i] = pixel | (pixel << 8) | (pixel << 16) | (pixel << 24);
+            const uint8_t level = *p > 15 ? 15 : *p;
+            const uint32_t luminance = (uint32_t)level * 17;
+            const uint32_t pixel = 0xff000000U | luminance | (luminance << 8) |
+                                   (luminance << 16);
+            memcpy(data + (size_t)j * stride + i * 4, &pixel, sizeof(pixel));
             p++;
         }
     }
     cairo_surface_mark_dirty(surface);
     if (semantic_text_active())
-        semantic_text_erase_raw_rectangle(x, y, w, h);
+        semantic_composite_erase_raw_rectangle(x, y, w, h);
 }
 
 void screen_rotate(double r) {
@@ -1168,6 +1184,7 @@ screen_surface_t *screen_surface_new(double width, double height) {
         return (screen_surface_t *)image;
     }
     fprintf(stderr, "surface_new: %s (%d)\n", cairo_status_to_string(status), status);
+    cairo_surface_destroy(image);
     return NULL;
 }
 
@@ -1175,9 +1192,14 @@ screen_surface_t *screen_surface_load_png(const char *filename) {
     cairo_surface_t *image = cairo_image_surface_create_from_png(filename);
     if (cairo_surface_status(image)) {
         fprintf(stderr, "load_png: %s\n", cairo_status_to_string(cairo_surface_status(image)));
+        cairo_surface_destroy(image);
         return NULL;
     }
     return (screen_surface_t *)image;
+}
+
+screen_surface_t *screen_surface_reference(screen_surface_t *s) {
+    return (screen_surface_t *)cairo_surface_reference((cairo_surface_t *)s);
 }
 
 void screen_surface_free(screen_surface_t *s) {
@@ -1207,7 +1229,7 @@ void screen_surface_display(screen_surface_t *s, double x, double y) {
     cairo_fill(cr);
     cairo_restore(cr);
     if (semantic_text_active())
-        semantic_text_erase_rectangle(x, y, width, height);
+        semantic_composite_erase_rectangle(x, y, width, height);
 }
 
 void screen_surface_display_region(screen_surface_t *s,
@@ -1220,7 +1242,7 @@ void screen_surface_display_region(screen_surface_t *s,
     cairo_fill(cr);
     cairo_restore(cr);
     if (semantic_text_active())
-        semantic_text_erase_rectangle(x, y, width, height);
+        semantic_composite_erase_rectangle(x, y, width, height);
 }
 
 void screen_context_new(screen_surface_t *target) {

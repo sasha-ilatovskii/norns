@@ -19,11 +19,14 @@
 #include "hardware/screen/screens.h"
 #include "hardware/screen/sharp_memory_dither.h"
 #include "hardware/screen/sharp_memory_protocol.h"
+#include "hardware/screen/sharp_memory_semantics.h"
 
 #define SHARP_MEMORY_WIDTH 400
 #define SHARP_MEMORY_HEIGHT 240
 #define SHARP_MEMORY_ROWS_PER_TRANSFER 60
 #define SHARP_MEMORY_DEFAULT_SPEED_HZ 2000000
+#define SHARP_MEMORY_MIN_SPEED_HZ 1000000
+#define SHARP_MEMORY_VCOM_HALF_PERIOD_NS 500000000L
 #define SHARP_MEMORY_DUMP_TRIGGER "/tmp/dump-sharp-frame"
 #define SHARP_MEMORY_DUMP_PATH "/tmp/sharp-frame.pbm"
 #define SHARP_MEMORY_DUMP_TEMP_PATH "/tmp/sharp-frame.pbm.tmp"
@@ -56,6 +59,7 @@ typedef struct _screen_sharp_memory_priv {
     uint8_t *packet;
     size_t packet_size;
     cairo_surface_t *source;
+    cairo_surface_t *semantic;
     cairo_surface_t *text;
     cairo_surface_t *stroke;
     cairo_surface_t *stroke_coverage;
@@ -69,7 +73,8 @@ typedef struct _screen_sharp_memory_priv {
     bool text_shadow;
     uint8_t text_second_shadow_level;
     bool vcom;
-    volatile bool refresh_running;
+    bool refresh_running;
+    bool refresh_thread_started;
     pthread_t refresh_thread;
     pthread_mutex_t paint_lock;
     bool frame_dirty;
@@ -83,20 +88,25 @@ static void screen_sharp_memory_paint(matron_fb_t *fb);
 static void screen_sharp_memory_bind(matron_fb_t *fb, cairo_surface_t *surface);
 static void screen_sharp_memory_bind_semantics(matron_fb_t *fb,
                                                const screen_semantics_t *semantics);
+static void screen_sharp_memory_set_invert(matron_fb_t *fb, bool inverted);
+static void screen_sharp_memory_get_semantic_config(matron_fb_t *fb,
+                                                    screen_semantic_config_t *config);
 
 screen_ops_t screen_sharp_memory_ops = {
     {
         // .io_ops
-        "screen:sharp-memory",                // .name
-        IO_SCREEN,                            // .type
-        sizeof(screen_sharp_memory_priv_t),   // .data_size
-        screen_sharp_memory_config,           // .config
-        screen_sharp_memory_setup,            // .setup
-        screen_sharp_memory_destroy,          // .destroy
+        "screen:sharp-memory",              // .name
+        IO_SCREEN,                          // .type
+        sizeof(screen_sharp_memory_priv_t), // .data_size
+        screen_sharp_memory_config,         // .config
+        screen_sharp_memory_setup,          // .setup
+        screen_sharp_memory_destroy,        // .destroy
     },
-    screen_sharp_memory_paint, // .paint
-    screen_sharp_memory_bind,  // .bind
-    screen_sharp_memory_bind_semantics, // .bind_semantics
+    screen_sharp_memory_paint,               // .paint
+    screen_sharp_memory_bind,                // .bind
+    screen_sharp_memory_bind_semantics,      // .bind_semantics
+    screen_sharp_memory_set_invert,          // .set_invert
+    screen_sharp_memory_get_semantic_config, // .get_semantic_config
 };
 
 static int config_string(lua_State *l, int table, const char *name, char **value, const char *fallback) {
@@ -204,8 +214,10 @@ static int screen_sharp_memory_config(matron_io_t *io, lua_State *l) {
     }
 
     const int speed_hz = config_integer(l, 2, "speed_hz", SHARP_MEMORY_DEFAULT_SPEED_HZ);
-    if (speed_hz < 100000 || speed_hz > SHARP_MEMORY_DEFAULT_SPEED_HZ) {
-        fprintf(stderr, "ERROR (screen:sharp-memory) 'speed_hz' must be between 100000 and 2000000\n");
+    if (speed_hz < SHARP_MEMORY_MIN_SPEED_HZ ||
+        speed_hz > SHARP_MEMORY_DEFAULT_SPEED_HZ) {
+        fprintf(stderr,
+                "ERROR (screen:sharp-memory) 'speed_hz' must be between 1000000 and 2000000\n");
         free(priv->cs_chip);
         free(priv->dev);
         priv->cs_chip = NULL;
@@ -253,27 +265,42 @@ static int screen_sharp_memory_config(matron_io_t *io, lua_State *l) {
     return 0;
 }
 
-static bool spi_write_transaction(screen_sharp_memory_priv_t *priv, const uint8_t *data, size_t size) {
+static bool set_cs(screen_sharp_memory_priv_t *priv, bool active) {
     struct gpio_v2_line_values cs_value = {};
     cs_value.mask = 1;
-    cs_value.bits = 1;
-    if (ioctl(priv->cs_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &cs_value) < 0)
+    cs_value.bits = active ? 1 : 0;
+    return ioctl(priv->cs_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &cs_value) >= 0;
+}
+
+static bool spi_write_bytes(screen_sharp_memory_priv_t *priv,
+                            const uint8_t *data,
+                            size_t size) {
+    while (size > 0) {
+        ssize_t written;
+        do {
+            written = write(priv->spi_fd, data, size);
+        } while (written < 0 && errno == EINTR);
+        if (written < 0)
+            return false;
+        if (written == 0) {
+            errno = EIO;
+            return false;
+        }
+        data += written;
+        size -= (size_t)written;
+    }
+    return true;
+}
+
+static bool spi_write_transaction(screen_sharp_memory_priv_t *priv,
+                                  const uint8_t *data,
+                                  size_t size) {
+    if (!set_cs(priv, true))
         return false;
 
-    ssize_t written;
-    do {
-        written = write(priv->spi_fd, data, size);
-    } while (written < 0 && errno == EINTR);
-
-    int transaction_errno = 0;
-    if (written < 0)
-        transaction_errno = errno;
-    else if ((size_t)written != size)
-        transaction_errno = EIO;
-
-    cs_value.bits = 0;
-    if (ioctl(priv->cs_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &cs_value) < 0 &&
-        transaction_errno == 0)
+    bool ok = spi_write_bytes(priv, data, size);
+    int transaction_errno = ok ? 0 : errno;
+    if (!set_cs(priv, false) && transaction_errno == 0)
         transaction_errno = errno;
 
     if (transaction_errno != 0) {
@@ -291,21 +318,44 @@ static bool send_command(screen_sharp_memory_priv_t *priv, uint8_t command) {
 }
 
 static bool send_frame(screen_sharp_memory_priv_t *priv, const uint8_t *frame) {
+    if (!set_cs(priv, true))
+        return false;
+
+    bool ok = true;
     for (uint32_t first_row = 0; first_row < SHARP_MEMORY_HEIGHT;
          first_row += SHARP_MEMORY_ROWS_PER_TRANSFER) {
         uint32_t row_count = SHARP_MEMORY_HEIGHT - first_row;
         if (row_count > SHARP_MEMORY_ROWS_PER_TRANSFER)
             row_count = SHARP_MEMORY_ROWS_PER_TRANSFER;
+        const bool first = first_row == 0;
+        const bool last = first_row + row_count == SHARP_MEMORY_HEIGHT;
 
-        const size_t encoded = sharp_memory_encode_rows(priv->packet,
-                                                        priv->packet_size,
-                                                        frame,
-                                                        SHARP_MEMORY_WIDTH,
-                                                        first_row,
-                                                        row_count,
-                                                        priv->vcom);
-        if (encoded == 0 || !spi_write_transaction(priv, priv->packet, encoded))
-            return false;
+        const size_t encoded = sharp_memory_encode_rows_fragment(priv->packet,
+                                                                 priv->packet_size,
+                                                                 frame,
+                                                                 SHARP_MEMORY_WIDTH,
+                                                                 first_row,
+                                                                 row_count,
+                                                                 priv->vcom,
+                                                                 first,
+                                                                 last);
+        if (encoded == 0) {
+            errno = EINVAL;
+            ok = false;
+            break;
+        }
+        if (!spi_write_bytes(priv, priv->packet, encoded)) {
+            ok = false;
+            break;
+        }
+    }
+
+    int transaction_errno = ok ? 0 : errno;
+    if (!set_cs(priv, false) && transaction_errno == 0)
+        transaction_errno = errno;
+    if (transaction_errno != 0) {
+        errno = transaction_errno;
+        return false;
     }
     return true;
 }
@@ -335,12 +385,17 @@ static void *screen_sharp_memory_refresh(void *data) {
     const long tick_ns = 1000000000L / priv->fps;
     struct timespec deadline;
     clock_gettime(CLOCK_MONOTONIC, &deadline);
-    int ticks_until_vcom = priv->fps;
+    struct timespec next_vcom = deadline;
+    advance_deadline(&next_vcom, SHARP_MEMORY_VCOM_HALF_PERIOD_NS);
     bool tx_pending = false;
     bool vcom_pending = false;
 
-    while (priv->refresh_running) {
+    for (;;) {
         pthread_mutex_lock(&priv->paint_lock);
+        if (!priv->refresh_running) {
+            pthread_mutex_unlock(&priv->paint_lock);
+            break;
+        }
         if (priv->frame_dirty) {
             uint8_t *next_frame = priv->frame;
             priv->frame = priv->tx_frame;
@@ -350,10 +405,11 @@ static void *screen_sharp_memory_refresh(void *data) {
         }
         pthread_mutex_unlock(&priv->paint_lock);
 
-        if (--ticks_until_vcom <= 0) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (!vcom_pending && deadline_reached(&next_vcom, &now)) {
             priv->vcom = !priv->vcom;
             vcom_pending = true;
-            ticks_until_vcom = priv->fps;
         }
 
         bool write_ok = true;
@@ -366,6 +422,11 @@ static void *screen_sharp_memory_refresh(void *data) {
         if (!write_ok) {
             report_write_error(priv);
         } else if (tx_pending || vcom_pending) {
+            if (vcom_pending) {
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                next_vcom = now;
+                advance_deadline(&next_vcom, SHARP_MEMORY_VCOM_HALF_PERIOD_NS);
+            }
             tx_pending = false;
             vcom_pending = false;
             priv->write_error_reported = false;
@@ -373,7 +434,6 @@ static void *screen_sharp_memory_refresh(void *data) {
 
         event_post(event_data_new(EVENT_SCREEN_REFRESH));
 
-        struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         do {
             advance_deadline(&deadline, tick_ns);
@@ -382,7 +442,7 @@ static void *screen_sharp_memory_refresh(void *data) {
         int sleep_result;
         do {
             sleep_result = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL);
-        } while (sleep_result == EINTR && priv->refresh_running);
+        } while (sleep_result == EINTR);
     }
     return NULL;
 }
@@ -563,6 +623,7 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
         close_spi(priv);
         return -1;
     }
+    priv->refresh_thread_started = true;
 
     const char *dither_name = "bayer8";
     if (priv->dither_mode == SHARP_MEMORY_DITHER_EDGE_AWARE)
@@ -581,13 +642,20 @@ static int screen_sharp_memory_setup(matron_io_t *io) {
 static void screen_sharp_memory_destroy(matron_io_t *io) {
     screen_sharp_memory_priv_t *priv = (screen_sharp_memory_priv_t *)io->data;
 
-    if (priv->refresh_running) {
+    if (priv->refresh_thread_started) {
+        pthread_mutex_lock(&priv->paint_lock);
         priv->refresh_running = false;
+        pthread_mutex_unlock(&priv->paint_lock);
         pthread_join(priv->refresh_thread, NULL);
+        priv->refresh_thread_started = false;
     }
     if (priv->source != NULL) {
         cairo_surface_destroy(priv->source);
         priv->source = NULL;
+    }
+    if (priv->semantic != NULL) {
+        cairo_surface_destroy(priv->semantic);
+        priv->semantic = NULL;
     }
     if (priv->text != NULL) {
         cairo_surface_destroy(priv->text);
@@ -639,94 +707,44 @@ static uint8_t source_luminance(const uint8_t *source_data,
     return sharp_memory_luminance(argb);
 }
 
-static bool semantic_text_luminance(const screen_sharp_memory_priv_t *priv,
-                                    const sharp_memory_viewport_t *viewport,
-                                    int32_t viewport_x,
-                                    int32_t viewport_y,
-                                    uint8_t *luminance) {
-    if (priv->text == NULL || viewport_x < 0 || viewport_y < 0 ||
-        (uint32_t)viewport_x >= viewport->width ||
-        (uint32_t)viewport_y >= viewport->height)
-        return false;
+typedef struct _sharp_memory_semantic_view {
+    const uint8_t *data;
+    int stride;
+    uint32_t width;
+    uint32_t height;
+} sharp_memory_semantic_view_t;
 
-    const uint32_t text_width = (uint32_t)cairo_image_surface_get_width(priv->text);
-    const uint32_t text_height = (uint32_t)cairo_image_surface_get_height(priv->text);
-    if (text_width == 0 || text_height == 0)
-        return false;
-
-    const uint32_t text_x =
-        (uint32_t)(((uint64_t)(uint32_t)viewport_x * text_width) / viewport->width);
-    const uint32_t text_y =
-        (uint32_t)(((uint64_t)(uint32_t)viewport_y * text_height) / viewport->height);
-    const int text_stride = cairo_image_surface_get_stride(priv->text);
-    const uint8_t *text_data = cairo_image_surface_get_data(priv->text);
-    if (text_data == NULL)
-        return false;
-
-    uint32_t argb;
-    memcpy(&argb, text_data + (size_t)text_y * text_stride + text_x * 4, 4);
-    if ((argb >> 24) < 128)
-        return false;
-    *luminance = sharp_memory_luminance(argb);
-    return true;
+static sharp_memory_semantic_view_t semantic_view(cairo_surface_t *surface) {
+    sharp_memory_semantic_view_t view = {};
+    if (surface == NULL)
+        return view;
+    view.data = cairo_image_surface_get_data(surface);
+    view.stride = cairo_image_surface_get_stride(surface);
+    view.width = (uint32_t)cairo_image_surface_get_width(surface);
+    view.height = (uint32_t)cairo_image_surface_get_height(surface);
+    return view;
 }
 
-static bool semantic_text_shadow_at(const screen_sharp_memory_priv_t *priv,
-                                    const sharp_memory_viewport_t *viewport,
-                                    uint32_t viewport_x,
-                                    uint32_t viewport_y) {
-    if (!priv->text_shadow)
-        return false;
-
-    for (uint8_t offset = 1; offset <= 2; ++offset) {
-        uint8_t luminance;
-        if (semantic_text_luminance(priv,
-                                    viewport,
-                                    (int32_t)viewport_x - offset,
-                                    (int32_t)viewport_y - offset,
-                                    &luminance) &&
-            sharp_memory_text_shadow_count(
-                luminance, priv->text_second_shadow_level) >= offset)
-            return true;
-    }
-    return false;
-}
-
-static bool semantic_surface_pixel_at(cairo_surface_t *surface,
-                                      const sharp_memory_viewport_t *viewport,
-                                      uint32_t viewport_x,
-                                      uint32_t viewport_y,
-                                      uint32_t *argb) {
-    if (surface == NULL || viewport->width == 0 || viewport->height == 0 ||
+static bool semantic_composite_pixel_at(const sharp_memory_semantic_view_t *semantic,
+                                        const sharp_memory_viewport_t *viewport,
+                                        uint32_t viewport_x,
+                                        uint32_t viewport_y,
+                                        sharp_memory_semantic_pixel_t *pixel) {
+    if (semantic->data == NULL || semantic->stride <= 0 || semantic->width == 0 ||
+        semantic->height == 0 || viewport->width == 0 || viewport->height == 0 ||
         viewport_x >= viewport->width || viewport_y >= viewport->height)
         return false;
-
-    const uint32_t surface_width = (uint32_t)cairo_image_surface_get_width(surface);
-    const uint32_t surface_height = (uint32_t)cairo_image_surface_get_height(surface);
-    if (surface_width == 0 || surface_height == 0)
-        return false;
-
-    const uint32_t surface_x =
-        (uint32_t)(((uint64_t)viewport_x * surface_width) / viewport->width);
-    const uint32_t surface_y =
-        (uint32_t)(((uint64_t)viewport_y * surface_height) / viewport->height);
-    const int surface_stride = cairo_image_surface_get_stride(surface);
-    const uint8_t *surface_data = cairo_image_surface_get_data(surface);
-    if (surface_data == NULL)
-        return false;
-
-    memcpy(argb, surface_data + (size_t)surface_y * surface_stride + surface_x * 4, 4);
-    return true;
-}
-
-static bool semantic_stroke_mask_at(cairo_surface_t *surface,
-                                    const sharp_memory_viewport_t *viewport,
-                                    uint32_t viewport_x,
-                                    uint32_t viewport_y,
-                                    uint8_t minimum_alpha) {
-    uint32_t argb;
-    return semantic_surface_pixel_at(surface, viewport, viewport_x, viewport_y, &argb) &&
-           (argb >> 24) >= minimum_alpha;
+    const uint32_t x =
+        (uint32_t)(((uint64_t)viewport_x * semantic->width) / viewport->width);
+    const uint32_t y =
+        (uint32_t)(((uint64_t)viewport_y * semantic->height) / viewport->height);
+    uint32_t encoded;
+    memcpy(&encoded,
+           semantic->data + (size_t)y * semantic->stride + (size_t)x * 4,
+           sizeof(encoded));
+    pixel->kind = (sharp_memory_semantic_kind_t)((encoded >> 16) & 0xff);
+    pixel->level = (uint8_t)((encoded >> 8) & 0xff);
+    return (encoded >> 24) != 0 && pixel->kind != SHARP_MEMORY_SEMANTIC_FALLBACK;
 }
 
 static bool write_all(int fd, const void *data, size_t size) {
@@ -837,6 +855,7 @@ static cairo_surface_t *semantic_debug_composite(
 
     uint8_t *data = cairo_image_surface_get_data(surface);
     const int stride = cairo_image_surface_get_stride(surface);
+    const sharp_memory_semantic_view_t semantic = semantic_view(priv->semantic);
     for (uint32_t y = 0; y < viewport->height; ++y) {
         uint32_t *row = (uint32_t *)(data + (size_t)y * stride);
         for (uint32_t x = 0; x < viewport->width; ++x) {
@@ -846,14 +865,17 @@ static cairo_surface_t *semantic_debug_composite(
                 (uint32_t)(((uint64_t)y * source_height) / viewport->height);
             const uint8_t canonical =
                 source_luminance(source_data, source_stride, source_x, source_y);
-            uint32_t coverage_argb = 0;
-            uint32_t stroke_argb = 0;
-            semantic_surface_pixel_at(
-                priv->stroke_coverage, viewport, x, y, &coverage_argb);
-            semantic_surface_pixel_at(priv->stroke, viewport, x, y, &stroke_argb);
-            row[x] = UINT32_C(0xff000000) | ((uint32_t)canonical << 16) |
-                     (((coverage_argb >> 24) & 0xff) << 8) |
-                     ((stroke_argb >> 24) & 0xff);
+            sharp_memory_semantic_pixel_t pixel = {};
+            if (!semantic_composite_pixel_at(&semantic, viewport, x, y, &pixel)) {
+                row[x] = UINT32_C(0xff000000) | ((uint32_t)canonical << 16);
+            } else if (pixel.kind == SHARP_MEMORY_SEMANTIC_TEXT) {
+                const uint32_t level = (uint32_t)pixel.level * 17;
+                row[x] = UINT32_C(0xff000000) | (level << 16) | (level << 8);
+            } else if (pixel.kind == SHARP_MEMORY_SEMANTIC_STROKE) {
+                row[x] = UINT32_C(0xff000000) | ((uint32_t)pixel.level * 17 << 8);
+            } else {
+                row[x] = UINT32_C(0xff0000ff);
+            }
         }
     }
     cairo_surface_mark_dirty(surface);
@@ -949,6 +971,8 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
 
     pthread_mutex_lock(&priv->paint_lock);
     cairo_surface_flush(priv->source);
+    if (priv->semantic != NULL)
+        cairo_surface_flush(priv->semantic);
     if (priv->text != NULL)
         cairo_surface_flush(priv->text);
     if (priv->stroke != NULL)
@@ -962,6 +986,7 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
     const uint8_t *source_data = cairo_image_surface_get_data(priv->source);
     const sharp_memory_viewport_t viewport = sharp_memory_fit_viewport(
         source_width, source_height, SHARP_MEMORY_WIDTH, SHARP_MEMORY_HEIGHT, priv->stretch);
+    const sharp_memory_semantic_view_t semantic = semantic_view(priv->semantic);
 
     if (source_data != NULL && source_width > 0 && source_height > 0) {
         for (uint32_t y = 0; y < SHARP_MEMORY_HEIGHT; ++y) {
@@ -994,42 +1019,30 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
                         const uint32_t viewport_x = x - viewport.x;
                         const uint32_t viewport_y = y - viewport.y;
                         const bool use_semantics =
-                            priv->semantics_valid == NULL || *priv->semantics_valid;
-                        uint8_t text_luminance;
-                        if (use_semantics &&
-                            semantic_text_luminance(priv,
-                                                    &viewport,
-                                                    (int32_t)viewport_x,
-                                                    (int32_t)viewport_y,
-                                                    &text_luminance)) {
+                            !priv->stretch &&
+                            priv->semantic != NULL &&
+                            (priv->semantics_valid == NULL || *priv->semantics_valid);
+                        sharp_memory_semantic_pixel_t semantic_pixel = {};
+                        const bool has_semantic =
+                            use_semantics && semantic_composite_pixel_at(&semantic,
+                                                                         &viewport,
+                                                                         viewport_x,
+                                                                         viewport_y,
+                                                                         &semantic_pixel);
+                        if (has_semantic &&
+                            semantic_pixel.kind == SHARP_MEMORY_SEMANTIC_TEXT) {
                             white = sharp_memory_tile3x3_is_white(
-                                text_luminance,
+                                (uint8_t)(semantic_pixel.level * 17),
                                 viewport_x,
                                 viewport_y,
                                 priv->tile_density_boost,
                                 priv->invert);
-                        } else if (use_semantics && semantic_stroke_mask_at(
-                                                        priv->stroke,
-                                                        &viewport,
-                                                        viewport_x,
-                                                        viewport_y,
-                                                        128)) {
+                        } else if (has_semantic &&
+                                   semantic_pixel.kind == SHARP_MEMORY_SEMANTIC_STROKE) {
                             white = !priv->invert;
-                        } else if (use_semantics && semantic_stroke_mask_at(
-                                                        priv->stroke_coverage,
-                                                        &viewport,
-                                                        viewport_x,
-                                                        viewport_y,
-                                                        1)) {
-                            // Any canonical Cairo coverage claims the complete
-                            // logical 3x3 tile. If the physical atlas left this
-                            // pixel empty it must remain background.
+                        } else if (has_semantic &&
+                                   semantic_pixel.kind == SHARP_MEMORY_SEMANTIC_BACKGROUND) {
                             white = priv->invert;
-                        } else if (use_semantics && semantic_text_shadow_at(
-                                                        priv, &viewport, viewport_x, viewport_y)) {
-                            // Solid maximum-level ink: white in the logical
-                            // norns palette, black in paper/inverted mode.
-                            white = !priv->invert;
                         } else {
                             white = sharp_memory_tile3x3_is_white(
                                 luminance,
@@ -1054,6 +1067,22 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
     pthread_mutex_unlock(&priv->paint_lock);
 }
 
+static void screen_sharp_memory_set_invert(matron_fb_t *fb, bool inverted) {
+    screen_sharp_memory_priv_t *priv = (screen_sharp_memory_priv_t *)fb->io.data;
+    if (priv->invert == inverted)
+        return;
+    priv->invert = inverted;
+    screen_sharp_memory_paint(fb);
+}
+
+static void screen_sharp_memory_get_semantic_config(matron_fb_t *fb,
+                                                    screen_semantic_config_t *config) {
+    screen_sharp_memory_priv_t *priv = (screen_sharp_memory_priv_t *)fb->io.data;
+    config->physical_scale = 3;
+    config->text_shadow = priv->text_shadow;
+    config->text_second_shadow_level = priv->text_second_shadow_level;
+}
+
 static void screen_sharp_memory_bind(matron_fb_t *fb, cairo_surface_t *surface) {
     screen_sharp_memory_priv_t *priv = (screen_sharp_memory_priv_t *)fb->io.data;
     if (priv->source != NULL)
@@ -1070,6 +1099,11 @@ static void screen_sharp_memory_bind_semantics(matron_fb_t *fb,
         cairo_surface_destroy(priv->stroke);
     if (priv->stroke_coverage != NULL)
         cairo_surface_destroy(priv->stroke_coverage);
+    if (priv->semantic != NULL)
+        cairo_surface_destroy(priv->semantic);
+    priv->semantic = semantics != NULL && semantics->composite != NULL
+                         ? cairo_surface_reference(semantics->composite)
+                         : NULL;
     priv->text = semantics != NULL && semantics->text != NULL
                      ? cairo_surface_reference(semantics->text)
                      : NULL;

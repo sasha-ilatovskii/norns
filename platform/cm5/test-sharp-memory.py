@@ -94,6 +94,14 @@ class ActiveHighCs:
         finally:
             self.set_value(self.value_inactive)
 
+    def transfer_fragments(self, spi, fragments):
+        self.set_value(self.value_active)
+        try:
+            for fragment in fragments:
+                spi.xfer2(list(fragment))
+        finally:
+            self.set_value(self.value_inactive)
+
     def close(self):
         self.set_value(self.value_inactive)
         if self.request is not None:
@@ -108,15 +116,20 @@ def command(spi, cs, value, vcom):
 
 
 def send_frame(spi, cs, frame, vcom):
+    fragments = []
     for first_row in range(0, HEIGHT, ROWS_PER_TRANSFER):
-        packet = bytearray([reverse_byte(WRITE | (VCOM if vcom else 0))])
+        packet = bytearray()
+        if first_row == 0:
+            packet.append(reverse_byte(WRITE | (VCOM if vcom else 0)))
         for row in range(first_row, min(first_row + ROWS_PER_TRANSFER, HEIGHT)):
             packet.append(reverse_byte(row + 1))
             start = row * BYTES_PER_ROW
             packet.extend(reverse_byte(value) for value in frame[start : start + BYTES_PER_ROW])
             packet.append(0)
-        packet.append(0)
-        cs.transfer(spi, packet)
+        if first_row + ROWS_PER_TRANSFER >= HEIGHT:
+            packet.append(0)
+        fragments.append(packet)
+    cs.transfer_fragments(spi, fragments)
 
 
 def make_pattern():

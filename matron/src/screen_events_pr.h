@@ -35,6 +35,7 @@ typedef enum {
     SCREEN_EVENT_CLEAR,
     SCREEN_EVENT_CLOSE_PATH,
     SCREEN_EVENT_EXPORT_PNG,
+    SCREEN_EVENT_EXPORT_SCREENSHOT,
     SCREEN_EVENT_DISPLAY_PNG,
     SCREEN_EVENT_DISPLAY_SURFACE,
     SCREEN_EVENT_DISPLAY_SURFACE_REGION,
@@ -102,6 +103,7 @@ union screen_event_payload {
 struct screen_event_data {
     int type;
     void *buf;
+    void (*buf_free)(void *);
     union screen_event_payload payload;
 };
 

@@ -45,6 +45,7 @@ void matron_cleanup(void) {
     osc_deinit();
     o_deinit();
     w_deinit();
+    screen_events_deinit();
 
     config_deinit();
     screen_deinit();

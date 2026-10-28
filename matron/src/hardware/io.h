@@ -1,8 +1,8 @@
 #pragma once
 
-#include <stdbool.h>
 #include <cairo.h>
 #include <lualib.h>
+#include <stdbool.h>
 #include <sys/queue.h>
 
 #ifdef __cplusplus
@@ -47,21 +47,26 @@ extern TAILQ_HEAD(io_head, _matron_io) io_queue;
 struct _matron_fb;
 
 typedef struct _screen_semantics {
+    // Ordered physical semantic compositor. Transparent pixels fall back to
+    // the canonical framebuffer; opaque pixels encode semantic kind + level.
+    cairo_surface_t *composite;
     // Transparent ARGB32 surface containing only text. Glyph coverage is
-    // deliberately rendered without antialiasing; RGB stores the norns level.
+    // retained as a diagnostic/scratch surface; RGB stores the norns level.
     cairo_surface_t *text;
-    // Transparent ARGB32 surface containing the already-styled physical
-    // stroke mask. The backend maps it to the output viewport as-is.
+    // Operation-local physical stroke mask retained for diagnostics.
     cairo_surface_t *stroke;
-    // Transparent ARGB32 mask covering the canonical stroke footprint at the
-    // logical framebuffer resolution. It owns all physical pixels mapped from
-    // a touched Cairo pixel so the framebuffer stroke cannot leak through the
-    // procedural pattern.
+    // Operation-local logical ownership mask retained for diagnostics.
     cairo_surface_t *stroke_coverage;
     // False asks a backend to fall back to the canonical framebuffer for a
     // frame containing blend operations the semantic layers cannot reproduce.
     const bool *valid;
 } screen_semantics_t;
+
+typedef struct _screen_semantic_config {
+    uint8_t physical_scale;
+    bool text_shadow;
+    uint8_t text_second_shadow_level;
+} screen_semantic_config_t;
 
 typedef struct _screen_ops {
     io_ops_t io_ops;
@@ -69,6 +74,8 @@ typedef struct _screen_ops {
     void (*paint)(struct _matron_fb *fb);
     void (*bind)(struct _matron_fb *fb, cairo_surface_t *surface);
     void (*bind_semantics)(struct _matron_fb *fb, const screen_semantics_t *semantics);
+    void (*set_invert)(struct _matron_fb *fb, bool inverted);
+    void (*get_semantic_config)(struct _matron_fb *fb, screen_semantic_config_t *config);
 } screen_ops_t;
 
 typedef struct _matron_fb {

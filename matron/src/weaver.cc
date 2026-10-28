@@ -963,8 +963,8 @@ int _screen_move_rel(lua_State *l) {
  */
 int _screen_line_rel(lua_State *l) {
     lua_check_num_args(2);
-    double x = (int)luaL_checknumber(l, 1);
-    double y = (int)luaL_checknumber(l, 2);
+    double x = luaL_checknumber(l, 1);
+    double y = luaL_checknumber(l, 2);
     screen_event_line_rel(x, y);
     lua_settop(l, 0);
     return 0;
@@ -1184,7 +1184,7 @@ int _screen_export_png(lua_State *l) {
 int _screen_export_screenshot(lua_State *l) {
     lua_check_num_args(1);
     const char *s = luaL_checkstring(l, 1);
-    screen_export_screenshot(s);
+    screen_event_export_screenshot(s);
     lua_settop(l, 0);
     return 0;
 }

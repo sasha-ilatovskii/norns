@@ -4,14 +4,17 @@ This port keeps the norns drawing API at 128x64 and adds a hardware output
 backend named `screen:sharp-memory`. By default the backend maps every Cairo
 pixel to an exact 3x3 block, yielding a centered 384x192 image on the 400x240
 panel. Its default renderer uses hand-tuned 3x3 patterns to represent all 16
-norns levels. Text and stroked paths carry semantic side layers so they can be
-optimized independently without changing the public `screen` API.
+norns levels. Text and stroked paths write into one ordered physical semantic
+compositor, so optimized pixels retain the painter order of the public
+`screen` API.
 
 The backend speaks the Sharp Memory LCD protocol directly through Linux
 `spidev`, with the display's active-high chip select driven by a separate GPIO.
 It does not require the `sharp_memory` DRM driver, a framebuffer, a custom
-kernel, or a device-tree overlay for the panel. It also maintains the software
-VCOM signal once per second while matron is running.
+kernel, or a device-tree overlay for the panel. Each frame uses one active-high
+CS transaction even though its bytes are written to `spidev` in bounded
+fragments. Software VCOM flips every 500 ms (one full polarity cycle per
+second) while matron is running.
 
 ## Requirements
 
@@ -97,8 +100,9 @@ python3 platform/cm5/test-sharp-memory.py
 ```
 
 The display should show a checkerboard for ten seconds and then clear. The test
-uses GPIO25 as active-high CS plus the same 2 MHz clock, byte ordering, line
-chunking, and software VCOM commands as the matron backend. Do not run it while
+uses GPIO25 as active-high CS plus the same 2 MHz clock, byte ordering,
+single-CS fragmented frame transfer, and software VCOM commands as the matron
+backend. Do not run it while
 matron is using the display.
 
 If the script reports `Permission denied`, refresh the login after adding the
@@ -153,7 +157,8 @@ valid values are 0 through 2.
 Text is rerasterized into a hard, non-antialiased mask. With
 `text_shadow=true`, levels 1 through 7 get one solid physical-pixel shadow at
 `+1,+1`; levels 8 through 14 get a second at `+2,+2`; level 15 gets no shadow.
-Change the split with `text_second_shadow_level`.
+The shadows are undithered background pixels (black in the normal palette and
+white when inverted). Change the split with `text_second_shadow_level`.
 
 Stroked paths are flattened and rerendered at the physical 384x192 resolution,
 so the same rules apply to horizontal, vertical, diagonal, arc, and Bezier
@@ -161,12 +166,12 @@ paths. The procedural outline atlas consists of upper, center, and lower tracks
 offset along the local path normal. At the default `screen.line_width(1)`, each
 track is one physical Sharp pixel wide, making a fully lit level-15 stroke
 three pixels wide. Larger API line widths scale the three tracks together.
-The renderer also keeps a separate 128x64 ownership mask for the complete
-original stroke footprint. It is rasterized with the canonical Cairo geometry
-and antialiasing, then expanded with the same exact 3x3 mapping as the main
-framebuffer. Physical pixels owned by the stroke but absent from the atlas are
-forced to the background, so the grayscale Cairo stroke cannot leak through
-the intended gaps as a second layer of 3x3 dithering.
+The original 128x64 stroke footprint is rasterized as an operation-local mask
+and expanded with the same exact 3x3 mapping as the main framebuffer. It first
+writes background ownership into the ordered compositor; the physical outline
+atlas then writes its foreground tracks on top. A later fill, image, text, or
+stroke overwrites those pixels in normal painter order, so neither the
+grayscale Cairo stroke nor an older semantic operation can leak through.
 
 Levels 1 through 7 draw the center track as `1/1` through `7/1` dash/space
 patterns. These compact physical-pixel periods remain visible even on a short
@@ -186,7 +191,8 @@ optimizations are active only in `tile3x3` mode.
 `stretch=false`, every 128x64 Cairo pixel occupies exactly 3x3 physical pixels,
 leaving 8-pixel side margins and 24-pixel top and bottom margins.
 `stretch=true` instead fills 400x240 at the cost of non-integer scaling and
-vertical distortion.
+vertical distortion. Exact physical semantic optimizations are disabled while
+stretching; that mode uses the canonical framebuffer renderer.
 
 Software VCOM is maintained by matron even when the image does not change.
 Do not leave the display powered for an extended period while matron is stopped.
@@ -206,16 +212,18 @@ surfaces:
 
 - `/tmp/sharp-frame.pbm`: final 400x240 1-bit panel frame
 - `/tmp/sharp-source.png`: canonical 128x64 Cairo framebuffer
-- `/tmp/sharp-text.png`: hard-antialiased text mask
-- `/tmp/sharp-stroke.png`: physical-resolution stroke atlas
-- `/tmp/sharp-coverage.png`: logical stroke ownership mask
-- `/tmp/sharp-semantics.png`: channel composite at physical viewport size
+- `/tmp/sharp-text.png`: operation-local hard-antialiased text mask
+- `/tmp/sharp-stroke.png`: operation-local physical stroke atlas
+- `/tmp/sharp-coverage.png`: operation-local logical ownership mask
+- `/tmp/sharp-semantics.png`: ordered compositor at physical viewport size
 
-In `sharp-semantics.png`, red is canonical Cairo luminance, green is logical
-stroke ownership, and blue is the physical stroke atlas. A canonical stroke
-with no green pixels was not captured by the semantic path; green with no blue
-shows pixels reserved as background around an optimized outline. This makes it
-possible to distinguish mask-generation bugs from the final 1-bit compositor.
+In `sharp-semantics.png`, red-only pixels are canonical Cairo fallback, yellow
+is hard text, green is a physical stroke-atlas pixel, and blue is explicit
+background ownership (stroke gaps, text antialias suppression, and text
+shadows). The full-frame ordered view is authoritative; the other three PNGs
+show the most recent operation-local masks used to update it. This makes it
+possible to distinguish mask-generation bugs from ordering and final 1-bit
+composition bugs.
 The trigger is one-shot, so frame capture does not add continuous disk writes.
 
 PBM can be copied directly to another computer or converted to PNG on the CM5:
