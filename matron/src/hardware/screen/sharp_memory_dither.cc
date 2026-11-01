@@ -90,6 +90,15 @@ static const uint16_t tile3x3_masks[10] = {
     0x1ff, // 111 / 111 / 111
 };
 
+// Thin, hard-rasterized glyph strokes need more coverage than filled graphics
+// at the same nominal norns level. This perceptual curve is deliberately
+// monotonic across all sixteen levels: dark text becomes legible without
+// flattening its brightness hierarchy, while black and white stay exact.
+// Values are lit pixels across five neighboring 3x3 logical-pixel tiles.
+static const uint8_t text_tile3x3_fill[16] = {
+    0, 6, 10, 13, 17, 20, 23, 25, 28, 31, 33, 36, 38, 40, 43, 45,
+};
+
 // Below this contrast, ordered dithering is left unchanged. Above the high
 // point, the Bayer threshold collapses to 50%, producing a solid logical edge.
 // Between the two points the amount of threshold modulation decreases
@@ -123,6 +132,22 @@ bool sharp_memory_dither_is_white(uint8_t luminance, uint32_t x, uint32_t y, boo
     return invert ? !white : white;
 }
 
+static bool tile3x3_is_white(uint8_t fill_numerator,
+                             uint32_t x,
+                             uint32_t y,
+                             bool invert) {
+    const uint32_t tile_x = x / 3;
+    const uint32_t tile_y = y / 3;
+    const uint8_t phase = (uint8_t)((tile_x + tile_y * 3) % 5);
+    uint8_t fill = (uint8_t)(fill_numerator / 5);
+    if (phase < fill_numerator % 5)
+        ++fill;
+
+    const uint8_t bit = (uint8_t)((y % 3) * 3 + (x % 3));
+    const bool white = (tile3x3_masks[fill] & (1U << bit)) != 0;
+    return invert ? !white : white;
+}
+
 bool sharp_memory_tile3x3_is_white(uint8_t luminance,
                                    uint32_t x,
                                    uint32_t y,
@@ -138,17 +163,23 @@ bool sharp_memory_tile3x3_is_white(uint8_t luminance,
         fill_numerator = (uint8_t)(fill_numerator + density_boost);
     if (fill_numerator > 45)
         fill_numerator = 45;
+    return tile3x3_is_white(fill_numerator, x, y, invert);
+}
 
-    const uint32_t tile_x = x / 3;
-    const uint32_t tile_y = y / 3;
-    const uint8_t phase = (uint8_t)((tile_x + tile_y * 3) % 5);
-    uint8_t fill = (uint8_t)(fill_numerator / 5);
-    if (phase < fill_numerator % 5)
-        ++fill;
-
-    const uint8_t bit = (uint8_t)((y % 3) * 3 + (x % 3));
-    const bool white = (tile3x3_masks[fill] & (1U << bit)) != 0;
-    return invert ? !white : white;
+bool sharp_memory_text_tile3x3_is_white(uint8_t luminance,
+                                        uint32_t x,
+                                        uint32_t y,
+                                        uint8_t density_boost,
+                                        bool invert) {
+    const uint8_t level = sharp_memory_level(luminance);
+    uint8_t fill_numerator = text_tile3x3_fill[level];
+    if (level > 0 && level < 15) {
+        fill_numerator = (uint8_t)(fill_numerator + density_boost);
+        // Preserve a distinct fully white level 15 even with a large boost.
+        if (fill_numerator > 44)
+            fill_numerator = 44;
+    }
+    return tile3x3_is_white(fill_numerator, x, y, invert);
 }
 
 uint8_t sharp_memory_text_shadow_count(uint8_t luminance, uint8_t second_shadow_level) {

@@ -1031,7 +1031,7 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
                                                                          &semantic_pixel);
                         if (has_semantic &&
                             semantic_pixel.kind == SHARP_MEMORY_SEMANTIC_TEXT) {
-                            white = sharp_memory_tile3x3_is_white(
+                            white = sharp_memory_text_tile3x3_is_white(
                                 (uint8_t)(semantic_pixel.level * 17),
                                 viewport_x,
                                 viewport_y,

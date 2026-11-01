@@ -76,6 +76,41 @@ TEST_CASE("3x3 tiles are stable, anchored, and invertible") {
     }
 }
 
+TEST_CASE("Text 3x3 tiles strengthen glyphs while preserving all levels") {
+    int previous_white = -1;
+    for (int level = 0; level < 16; ++level) {
+        const uint8_t luminance = (uint8_t)(level * 17);
+        int text_white = 0;
+        int generic_white = 0;
+        for (uint32_t y = 0; y < 3; ++y) {
+            for (uint32_t x = 0; x < 15; ++x) {
+                text_white +=
+                    sharp_memory_text_tile3x3_is_white(luminance, x, y, 1, false) ? 1 : 0;
+                generic_white +=
+                    sharp_memory_tile3x3_is_white(luminance, x, y, 1, false) ? 1 : 0;
+            }
+        }
+        CHECK(text_white > previous_white);
+        if (level > 0 && level < 15)
+            CHECK(text_white > generic_white);
+        else
+            CHECK(text_white == generic_white);
+        previous_white = text_white;
+    }
+    CHECK(previous_white == 45);
+}
+
+TEST_CASE("Text 3x3 tiles remain stable and invertible") {
+    for (uint32_t y = 0; y < 15; ++y) {
+        for (uint32_t x = 0; x < 15; ++x) {
+            const bool normal =
+                sharp_memory_text_tile3x3_is_white(51, x, y, 1, false);
+            CHECK(sharp_memory_text_tile3x3_is_white(51, x, y, 1, false) == normal);
+            CHECK(sharp_memory_text_tile3x3_is_white(51, x, y, 1, true) != normal);
+        }
+    }
+}
+
 TEST_CASE("Text shadows adapt to norns level") {
     CHECK(sharp_memory_text_shadow_count(0, 8) == 0);
     CHECK(sharp_memory_text_shadow_count(17, 8) == 1);

@@ -18,6 +18,11 @@ bool sharp_memory_tile3x3_is_white(uint8_t luminance,
                                    uint32_t y,
                                    uint8_t density_boost,
                                    bool invert);
+bool sharp_memory_text_tile3x3_is_white(uint8_t luminance,
+                                        uint32_t x,
+                                        uint32_t y,
+                                        uint8_t density_boost,
+                                        bool invert);
 uint8_t sharp_memory_text_shadow_count(uint8_t luminance, uint8_t second_shadow_level);
 uint8_t sharp_memory_edge_contrast(uint8_t center,
                                    uint8_t left,

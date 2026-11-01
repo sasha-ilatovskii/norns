@@ -154,7 +154,9 @@ distributed across five neighboring tiles, so all 16 norns levels remain
 distinct. `tile_density_boost=1` makes intermediate levels slightly denser;
 valid values are 0 through 2.
 
-Text is rerasterized into a hard, non-antialiased mask. With
+Text is rerasterized into a hard, non-antialiased mask. A monotonic
+text-specific 3x3 density curve gives thin glyph strokes more coverage at low
+and middle levels while retaining distinct levels 0 through 15. With
 `text_shadow=true`, levels 1 through 7 get one solid physical-pixel shadow at
 `+1,+1`; levels 8 through 14 get a second at `+2,+2`; level 15 gets no shadow.
 The shadows are undithered background pixels (black in the normal palette and
