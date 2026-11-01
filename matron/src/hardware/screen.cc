@@ -271,10 +271,13 @@ static void semantic_show_text(const char *text) {
                                       (uint8_t)(level * 17),
                                       semantic_config.text_second_shadow_level)
                                 : 0;
+    const sharp_memory_semantic_kind_t shadow_kind =
+        level == 0 ? SHARP_MEMORY_SEMANTIC_BACKGROUND
+                   : SHARP_MEMORY_SEMANTIC_FOREGROUND;
     for (int offset = shadows; offset >= 1; --offset) {
         sharp_memory_semantic_apply_logical_mask(semantic_composite_surface,
                                                  semantic_text_surface,
-                                                 SHARP_MEMORY_SEMANTIC_FOREGROUND,
+                                                 shadow_kind,
                                                  semantic_config.physical_scale,
                                                  offset,
                                                  offset,

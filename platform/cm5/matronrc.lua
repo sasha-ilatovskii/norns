@@ -25,9 +25,10 @@ _boot.add_io('screen:sharp-memory', {
   dither = 'tile3x3',
   tile_density_boost = 1,
 
-  -- Text is rerasterized without antialiasing. Levels 1..7 receive one solid
-  -- foreground support layer; levels 8..15 receive a second; level 0 stays
-  -- empty. Support is white normally and black when the display is inverted.
+  -- Text is rerasterized without antialiasing. Level 0 gets one background
+  -- layer, levels 1..7 get two foreground support layers, levels 8..14 get
+  -- one, and level 15 gets none. Foreground is white normally and black when
+  -- the display is inverted.
   text_shadow = true,
   text_second_shadow_level = 8,
 

@@ -157,10 +157,12 @@ valid values are 0 through 2.
 Text is rerasterized into a hard, non-antialiased mask. A monotonic
 text-specific 3x3 density curve gives thin glyph strokes more coverage at low
 and middle levels while retaining distinct levels 0 through 15. With
-`text_shadow=true`, levels 1 through 7 get one solid foreground support layer
-at `+1,+1`; levels 8 through 15 get a second at `+2,+2`; level 0 remains empty.
+`text_shadow=true`, level 0 gets one background-colored layer at `+1,+1`,
+levels 1 through 7 get two solid foreground support layers at `+1,+1` and
+`+2,+2`, and levels 8 through 14 get one at `+1,+1`. Level 15 gets no shadow.
 The support pixels are undithered white in the normal palette and black when
-inverted. Change the split with `text_second_shadow_level`.
+inverted; the level-0 layer uses the opposite background color. Change the
+split with `text_second_shadow_level`.
 
 Stroked paths are flattened and rerendered at the physical 384x192 resolution,
 so the same rules apply to horizontal, vertical, diagonal, arc, and Bezier

@@ -112,12 +112,12 @@ TEST_CASE("Text 3x3 tiles remain stable and invertible") {
 }
 
 TEST_CASE("Text shadows adapt to norns level") {
-    CHECK(sharp_memory_text_shadow_count(0, 8) == 0);
-    CHECK(sharp_memory_text_shadow_count(17, 8) == 1);
-    CHECK(sharp_memory_text_shadow_count(7 * 17, 8) == 1);
-    CHECK(sharp_memory_text_shadow_count(8 * 17, 8) == 2);
-    CHECK(sharp_memory_text_shadow_count(14 * 17, 8) == 2);
-    CHECK(sharp_memory_text_shadow_count(255, 8) == 2);
+    CHECK(sharp_memory_text_shadow_count(0, 8) == 1);
+    CHECK(sharp_memory_text_shadow_count(17, 8) == 2);
+    CHECK(sharp_memory_text_shadow_count(7 * 17, 8) == 2);
+    CHECK(sharp_memory_text_shadow_count(8 * 17, 8) == 1);
+    CHECK(sharp_memory_text_shadow_count(14 * 17, 8) == 1);
+    CHECK(sharp_memory_text_shadow_count(255, 8) == 0);
 }
 
 TEST_CASE("Edge contrast is the largest four-neighbor luminance difference") {
