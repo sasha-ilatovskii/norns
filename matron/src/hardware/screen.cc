@@ -274,7 +274,7 @@ static void semantic_show_text(const char *text) {
     for (int offset = shadows; offset >= 1; --offset) {
         sharp_memory_semantic_apply_logical_mask(semantic_composite_surface,
                                                  semantic_text_surface,
-                                                 SHARP_MEMORY_SEMANTIC_BACKGROUND,
+                                                 SHARP_MEMORY_SEMANTIC_FOREGROUND,
                                                  semantic_config.physical_scale,
                                                  offset,
                                                  offset,

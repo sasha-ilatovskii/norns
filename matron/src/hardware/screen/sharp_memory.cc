@@ -873,6 +873,8 @@ static cairo_surface_t *semantic_debug_composite(
                 row[x] = UINT32_C(0xff000000) | (level << 16) | (level << 8);
             } else if (pixel.kind == SHARP_MEMORY_SEMANTIC_STROKE) {
                 row[x] = UINT32_C(0xff000000) | ((uint32_t)pixel.level * 17 << 8);
+            } else if (pixel.kind == SHARP_MEMORY_SEMANTIC_FOREGROUND) {
+                row[x] = UINT32_C(0xffff00ff);
             } else {
                 row[x] = UINT32_C(0xff0000ff);
             }
@@ -1038,7 +1040,9 @@ static void screen_sharp_memory_paint(matron_fb_t *fb) {
                                 priv->tile_density_boost,
                                 priv->invert);
                         } else if (has_semantic &&
-                                   semantic_pixel.kind == SHARP_MEMORY_SEMANTIC_STROKE) {
+                                   (semantic_pixel.kind == SHARP_MEMORY_SEMANTIC_STROKE ||
+                                    semantic_pixel.kind ==
+                                        SHARP_MEMORY_SEMANTIC_FOREGROUND)) {
                             white = !priv->invert;
                         } else if (has_semantic &&
                                    semantic_pixel.kind == SHARP_MEMORY_SEMANTIC_BACKGROUND) {

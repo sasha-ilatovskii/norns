@@ -10,6 +10,7 @@ typedef enum _sharp_memory_semantic_kind {
     SHARP_MEMORY_SEMANTIC_TEXT,
     SHARP_MEMORY_SEMANTIC_STROKE,
     SHARP_MEMORY_SEMANTIC_BACKGROUND,
+    SHARP_MEMORY_SEMANTIC_FOREGROUND,
 } sharp_memory_semantic_kind_t;
 
 typedef struct _sharp_memory_semantic_pixel {

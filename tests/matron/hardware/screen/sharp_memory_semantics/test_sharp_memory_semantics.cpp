@@ -85,14 +85,14 @@ TEST_CASE("later semantic operations overwrite earlier operations in painter ord
     cairo_surface_destroy(logical);
 }
 
-TEST_CASE("offset shadows are clipped and text can overwrite their overlap") {
+TEST_CASE("offset foreground support is clipped and text can overwrite its overlap") {
     cairo_surface_t *mask = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
     cairo_surface_t *target = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 4, 4);
     set_mask_pixel(mask, 0, 0, 8);
 
     sharp_memory_semantic_apply_logical_mask(target,
                                              mask,
-                                             SHARP_MEMORY_SEMANTIC_BACKGROUND,
+                                             SHARP_MEMORY_SEMANTIC_FOREGROUND,
                                              3,
                                              2,
                                              2,
@@ -106,7 +106,7 @@ TEST_CASE("offset shadows are clipped and text can overwrite their overlap") {
                                              128);
 
     CHECK(pixel_at(target, 2, 2).kind == SHARP_MEMORY_SEMANTIC_TEXT);
-    CHECK(pixel_at(target, 3, 3).kind == SHARP_MEMORY_SEMANTIC_BACKGROUND);
+    CHECK(pixel_at(target, 3, 3).kind == SHARP_MEMORY_SEMANTIC_FOREGROUND);
 
     cairo_surface_destroy(target);
     cairo_surface_destroy(mask);

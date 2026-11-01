@@ -157,10 +157,10 @@ valid values are 0 through 2.
 Text is rerasterized into a hard, non-antialiased mask. A monotonic
 text-specific 3x3 density curve gives thin glyph strokes more coverage at low
 and middle levels while retaining distinct levels 0 through 15. With
-`text_shadow=true`, levels 1 through 7 get one solid physical-pixel shadow at
-`+1,+1`; levels 8 through 14 get a second at `+2,+2`; level 15 gets no shadow.
-The shadows are undithered background pixels (black in the normal palette and
-white when inverted). Change the split with `text_second_shadow_level`.
+`text_shadow=true`, levels 1 through 7 get one solid foreground support layer
+at `+1,+1`; levels 8 through 15 get a second at `+2,+2`; level 0 remains empty.
+The support pixels are undithered white in the normal palette and black when
+inverted. Change the split with `text_second_shadow_level`.
 
 Stroked paths are flattened and rerendered at the physical 384x192 resolution,
 so the same rules apply to horizontal, vertical, diagonal, arc, and Bezier
@@ -220,12 +220,12 @@ surfaces:
 - `/tmp/sharp-semantics.png`: ordered compositor at physical viewport size
 
 In `sharp-semantics.png`, red-only pixels are canonical Cairo fallback, yellow
-is hard text, green is a physical stroke-atlas pixel, and blue is explicit
-background ownership (stroke gaps, text antialias suppression, and text
-shadows). The full-frame ordered view is authoritative; the other three PNGs
-show the most recent operation-local masks used to update it. This makes it
-possible to distinguish mask-generation bugs from ordering and final 1-bit
-composition bugs.
+is hard text, magenta is solid foreground text support, green is a physical
+stroke-atlas pixel, and blue is explicit background ownership (stroke gaps and
+text antialias suppression). The full-frame ordered view is authoritative; the
+other three PNGs show the most recent operation-local masks used to update it.
+This makes it possible to distinguish mask-generation bugs from ordering and
+final 1-bit composition bugs.
 The trigger is one-shot, so frame capture does not add continuous disk writes.
 
 PBM can be copied directly to another computer or converted to PNG on the CM5:

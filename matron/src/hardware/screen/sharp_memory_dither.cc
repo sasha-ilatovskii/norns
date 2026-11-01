@@ -184,7 +184,7 @@ bool sharp_memory_text_tile3x3_is_white(uint8_t luminance,
 
 uint8_t sharp_memory_text_shadow_count(uint8_t luminance, uint8_t second_shadow_level) {
     const uint8_t level = sharp_memory_level(luminance);
-    if (level == 0 || level == 15)
+    if (level == 0)
         return 0;
     return level >= second_shadow_level ? 2 : 1;
 }
