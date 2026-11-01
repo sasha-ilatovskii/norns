@@ -3,6 +3,7 @@
 #include <cairo.h>
 #include <lualib.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <sys/queue.h>
 
 #ifdef __cplusplus
