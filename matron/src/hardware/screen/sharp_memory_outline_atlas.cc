@@ -16,29 +16,28 @@ struct contour_t {
     bool closed = false;
 };
 
-// Compact physical-pixel periods keep brightness visible on short UI strokes.
-// In particular, a four-Cairo-pixel step marker is only twelve Sharp pixels
-// long, so the former 16--80 pixel dashes made levels 1 through 6 look solid
-// and nearly identical. Levels 1--7 now use the requested N-on/1-off center
-// track. Levels 8--14 progressively add staggered side tracks; level 15 is a
-// solid three-pixel contour.
+// A compact eight-physical-pixel period keeps brightness visible on short UI
+// strokes. Levels 1--6 progressively fill the center track, level 7 makes it
+// solid, and levels 8--14 add equal upper and lower tracks. Keeping both side
+// tracks identical makes the apparent stroke position independent of path
+// direction. Level 15 is a solid three-pixel contour.
 static const sharp_memory_outline_style_t styles[16] = {
     {1, {0, 0, 0}, {0, 0, 0}},
-    {2, {0, 1, 0}, {0, 0, 0}},
-    {3, {0, 2, 0}, {0, 0, 0}},
-    {4, {0, 3, 0}, {0, 0, 0}},
-    {5, {0, 4, 0}, {0, 0, 0}},
-    {6, {0, 5, 0}, {0, 0, 0}},
-    {7, {0, 6, 0}, {0, 0, 0}},
-    {8, {0, 7, 0}, {0, 0, 0}},
-    {4, {1, 4, 0}, {0, 0, 2}},
-    {4, {1, 4, 1}, {0, 0, 2}},
-    {4, {2, 4, 1}, {0, 0, 2}},
-    {4, {2, 4, 2}, {0, 0, 2}},
-    {4, {3, 4, 2}, {0, 0, 2}},
-    {4, {4, 4, 2}, {0, 0, 2}},
-    {4, {4, 4, 3}, {0, 0, 2}},
-    {4, {4, 4, 4}, {0, 0, 2}},
+    {8, {0, 1, 0}, {0, 0, 0}},
+    {8, {0, 2, 0}, {0, 0, 0}},
+    {8, {0, 3, 0}, {0, 0, 0}},
+    {8, {0, 4, 0}, {0, 0, 0}},
+    {8, {0, 5, 0}, {0, 0, 0}},
+    {8, {0, 6, 0}, {0, 0, 0}},
+    {8, {0, 8, 0}, {0, 0, 0}},
+    {8, {1, 8, 1}, {0, 0, 0}},
+    {8, {2, 8, 2}, {0, 0, 0}},
+    {8, {3, 8, 3}, {0, 0, 0}},
+    {8, {4, 8, 4}, {0, 0, 0}},
+    {8, {5, 8, 5}, {0, 0, 0}},
+    {8, {6, 8, 6}, {0, 0, 0}},
+    {8, {7, 8, 7}, {0, 0, 0}},
+    {8, {8, 8, 8}, {0, 0, 0}},
 };
 
 static point_t add(point_t a, point_t b) {
@@ -203,18 +202,62 @@ static point_t offset_vertex(const contour_t &contour,
     return add(contour.points[index], multiply(miter, miter_distance));
 }
 
-static void append_offset_contour(cairo_t *context,
-                                  const contour_t &contour,
-                                  double offset,
-                                  double miter_limit) {
-    const point_t first = offset_vertex(contour, 0, offset, miter_limit);
-    cairo_move_to(context, first.x, first.y);
-    for (size_t index = 1; index < contour.points.size(); ++index) {
-        const point_t point = offset_vertex(contour, index, offset, miter_limit);
-        cairo_line_to(context, point.x, point.y);
-    }
-    if (contour.closed)
+static std::vector<point_t> offset_contour_points(const contour_t &contour,
+                                                  double offset,
+                                                  double miter_limit) {
+    std::vector<point_t> points;
+    points.reserve(contour.points.size());
+    for (size_t index = 0; index < contour.points.size(); ++index)
+        points.push_back(offset_vertex(contour, index, offset, miter_limit));
+    return points;
+}
+
+static double contour_length(const std::vector<point_t> &points, bool closed) {
+    if (points.size() < 2)
+        return 0.0;
+    double total = 0.0;
+    const size_t segments = closed ? points.size() : points.size() - 1;
+    for (size_t index = 0; index < segments; ++index)
+        total += length(subtract(points[(index + 1) % points.size()], points[index]));
+    return total;
+}
+
+static void append_contour(cairo_t *context,
+                           const std::vector<point_t> &points,
+                           bool closed) {
+    if (points.size() < 2)
+        return;
+    cairo_move_to(context, points[0].x, points[0].y);
+    for (size_t index = 1; index < points.size(); ++index)
+        cairo_line_to(context, points[index].x, points[index].y);
+    if (closed)
         cairo_close_path(context);
+}
+
+static void set_fitted_open_dash(cairo_t *context,
+                                 double total,
+                                 double dash,
+                                 double period) {
+    if (total < 1e-9 || dash <= 0.0 || period <= 0.0)
+        return;
+    if (total <= dash + 1e-9) {
+        cairo_set_dash(context, nullptr, 0, 0.0);
+        return;
+    }
+
+    const double gap = period - dash;
+    // Choose the closest integer number of whole dash blocks, then scale dash
+    // and gap together just enough for the sequence to start and end with
+    // equal complete dashes. This preserves mean coverage on short strokes
+    // instead of dropping a high-level dash that does not fit.
+    const size_t count = std::max<size_t>(
+        static_cast<size_t>(std::floor((total + gap) / period + 0.5)), 1);
+    const double nominal_span = count * dash + (count - 1) * gap;
+    const double scale = total / nominal_span;
+    const double fitted_dash = dash * scale;
+    const double fitted_gap = gap * scale;
+    const double dashes[2] = {fitted_dash, fitted_gap};
+    cairo_set_dash(context, dashes, 2, 0.0);
 }
 
 } // namespace
@@ -265,21 +308,38 @@ void sharp_memory_outline_render(cairo_t *path_context,
         if (dash == 0)
             continue;
 
-        cairo_new_path(context);
-        for (const contour_t &contour : contours)
-            append_offset_contour(
-                context, contour, offsets[track], cairo_get_miter_limit(path_context));
+        for (const contour_t &contour : contours) {
+            const std::vector<point_t> points = offset_contour_points(
+                contour, offsets[track], cairo_get_miter_limit(path_context));
+            const double total = contour_length(points, contour.closed);
+            if (total < 1e-9)
+                continue;
 
-        if (dash >= style.period_px) {
-            cairo_set_dash(context, nullptr, 0, 0.0);
-        } else {
-            const double dashes[2] = {
-                static_cast<double>(dash),
-                static_cast<double>(style.period_px - dash),
-            };
-            cairo_set_dash(context, dashes, 2, style.phase_px[track]);
+            cairo_new_path(context);
+            if (dash >= style.period_px) {
+                cairo_set_dash(context, nullptr, 0, 0.0);
+                append_contour(context, points, contour.closed);
+            } else if (!contour.closed) {
+                set_fitted_open_dash(context,
+                                     total,
+                                     static_cast<double>(dash),
+                                     static_cast<double>(style.period_px));
+                append_contour(context, points, false);
+            } else {
+                // A closed contour has no meaningful center. Fit an integer
+                // number of periods around its perimeter so the dash pattern
+                // reaches the seam in exactly the same state in which it left.
+                const double nominal_period = static_cast<double>(style.period_px);
+                const double cycles = std::max(1.0, std::round(total / nominal_period));
+                const double period = total / cycles;
+                const double scaled_dash = period * dash / nominal_period;
+                const double dashes[2] = {scaled_dash, period - scaled_dash};
+                const double phase = style.phase_px[track] * period / nominal_period;
+                cairo_set_dash(context, dashes, 2, phase);
+                append_contour(context, points, true);
+            }
+            cairo_stroke(context);
         }
-        cairo_stroke(context);
     }
 
     cairo_destroy(context);

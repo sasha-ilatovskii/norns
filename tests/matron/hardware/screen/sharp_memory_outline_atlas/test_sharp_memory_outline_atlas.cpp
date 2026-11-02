@@ -5,21 +5,21 @@
 TEST_CASE("outline atlas uses compact periods and ordered track fill") {
     const uint8_t expected_periods[16] = {
         1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        7,
         8,
-        4,
-        4,
-        4,
-        4,
-        4,
-        4,
-        4,
-        4,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
     };
     const uint8_t expected_dashes[16][SHARP_MEMORY_OUTLINE_TRACK_COUNT] = {
         {0, 0, 0},
@@ -29,15 +29,15 @@ TEST_CASE("outline atlas uses compact periods and ordered track fill") {
         {0, 4, 0},
         {0, 5, 0},
         {0, 6, 0},
-        {0, 7, 0},
-        {1, 4, 0},
-        {1, 4, 1},
-        {2, 4, 1},
-        {2, 4, 2},
-        {3, 4, 2},
-        {4, 4, 2},
-        {4, 4, 3},
-        {4, 4, 4},
+        {0, 8, 0},
+        {1, 8, 1},
+        {2, 8, 2},
+        {3, 8, 3},
+        {4, 8, 4},
+        {5, 8, 5},
+        {6, 8, 6},
+        {7, 8, 7},
+        {8, 8, 8},
     };
 
     for (uint8_t level = 0; level < 16; ++level) {
@@ -47,7 +47,7 @@ TEST_CASE("outline atlas uses compact periods and ordered track fill") {
             CHECK(style.dash_px[track] == expected_dashes[level][track]);
         CHECK(style.phase_px[SHARP_MEMORY_OUTLINE_UPPER] == 0);
         CHECK(style.phase_px[SHARP_MEMORY_OUTLINE_CENTER] == 0);
-        CHECK(style.phase_px[SHARP_MEMORY_OUTLINE_LOWER] == (level >= 8 ? 2 : 0));
+        CHECK(style.phase_px[SHARP_MEMORY_OUTLINE_LOWER] == 0);
     }
 }
 
@@ -85,6 +85,97 @@ TEST_CASE("short step indicators retain distinct low brightness levels") {
     cairo_path_destroy(flat_path);
     cairo_destroy(path_context);
     cairo_surface_destroy(path_surface);
+}
+
+TEST_CASE("open dash patterns are symmetric without orphaned endpoint fragments") {
+    cairo_surface_t *path_surface =
+        cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 32, 12);
+    cairo_t *path_context = cairo_create(path_surface);
+    cairo_move_to(path_context, 4.0, 6.0);
+    cairo_line_to(path_context, 17.0, 6.0);
+    cairo_path_t *flat_path = cairo_copy_path_flat(path_context);
+
+    cairo_surface_t *target =
+        cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 32, 12);
+    sharp_memory_outline_render(path_context, flat_path, target, 3, 1.0);
+    cairo_surface_flush(target);
+
+    const uint32_t *pixels =
+        reinterpret_cast<const uint32_t *>(cairo_image_surface_get_data(target));
+    const int stride = cairo_image_surface_get_stride(target) / sizeof(uint32_t);
+    bool ink[32] = {};
+    for (int x = 0; x < 32; ++x) {
+        for (int y = 0; y < 12; ++y)
+            ink[x] = ink[x] || pixels[y * stride + x] != 0;
+    }
+
+    // Pixel centers from x=4 through x=16 mirror around the geometric center
+    // at 10.5. A fixed start phase would leave an unmatched one-pixel tail.
+    for (int x = 4; x <= 16; ++x) {
+        CAPTURE(x);
+        CHECK(ink[x] == ink[20 - x]);
+    }
+
+    int first = 0;
+    while (first < 32 && !ink[first])
+        ++first;
+    int last = 31;
+    while (last >= 0 && !ink[last])
+        --last;
+    int first_run = 0;
+    while (first + first_run < 32 && ink[first + first_run])
+        ++first_run;
+    int last_run = 0;
+    while (last - last_run >= 0 && ink[last - last_run])
+        ++last_run;
+    CHECK(first_run >= 2);
+    CHECK(last_run == first_run);
+
+    cairo_surface_destroy(target);
+    cairo_path_destroy(flat_path);
+    cairo_destroy(path_context);
+    cairo_surface_destroy(path_surface);
+}
+
+TEST_CASE("symmetric side tracks are independent of path direction") {
+    auto render = [](double start_x, double end_x) {
+        cairo_surface_t *path_surface =
+            cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 40, 16);
+        cairo_t *path_context = cairo_create(path_surface);
+        cairo_move_to(path_context, start_x, 8.0);
+        cairo_line_to(path_context, end_x, 8.0);
+        cairo_path_t *flat_path = cairo_copy_path_flat(path_context);
+
+        cairo_surface_t *target =
+            cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 40, 16);
+        sharp_memory_outline_render(path_context, flat_path, target, 11, 1.0);
+        cairo_surface_flush(target);
+
+        cairo_path_destroy(flat_path);
+        cairo_destroy(path_context);
+        cairo_surface_destroy(path_surface);
+        return target;
+    };
+
+    cairo_surface_t *forward = render(5.0, 34.0);
+    cairo_surface_t *reverse = render(34.0, 5.0);
+    const uint32_t *forward_pixels =
+        reinterpret_cast<const uint32_t *>(cairo_image_surface_get_data(forward));
+    const uint32_t *reverse_pixels =
+        reinterpret_cast<const uint32_t *>(cairo_image_surface_get_data(reverse));
+    const int forward_stride = cairo_image_surface_get_stride(forward) / sizeof(uint32_t);
+    const int reverse_stride = cairo_image_surface_get_stride(reverse) / sizeof(uint32_t);
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 40; ++x) {
+            CAPTURE(x);
+            CAPTURE(y);
+            CHECK(forward_pixels[y * forward_stride + x] ==
+                  reverse_pixels[y * reverse_stride + x]);
+        }
+    }
+
+    cairo_surface_destroy(reverse);
+    cairo_surface_destroy(forward);
 }
 
 TEST_CASE("outline atlas keeps level metadata in RGB and opacity in alpha") {

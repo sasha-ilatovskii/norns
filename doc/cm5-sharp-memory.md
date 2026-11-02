@@ -177,14 +177,20 @@ atlas then writes its foreground tracks on top. A later fill, image, text, or
 stroke overwrites those pixels in normal painter order, so neither the
 grayscale Cairo stroke nor an older semantic operation can leak through.
 
-Levels 1 through 7 draw the center track as `1/1` through `7/1` dash/space
-patterns. These compact physical-pixel periods remain visible even on a short
-four-Cairo-pixel indicator. Levels 8 through 12 keep the center solid and add
-staggered four-pixel-period side tracks. Levels 13 and 14 keep two tracks solid
-while filling the third; level 15 makes all three tracks solid. Filled paths,
-images, `poke`, and offscreen images continue through the normal 3x3 tile
-renderer. Frames that use a complex Cairo blend operator safely fall back to
-that normal framebuffer renderer.
+Levels 1 through 6 progressively fill only the center track with an
+eight-physical-pixel period, and level 7 makes that track solid. Levels 8
+through 14 keep the center solid while adding identical upper and lower tracks
+from `1/8` through `7/8`. Because both sides always have equal coverage, the
+apparent stroke position does not change when path direction reverses. Level
+15 makes all three tracks solid. Filled paths, images, `poke`, and offscreen
+images continue through the normal 3x3 tile renderer. Frames that use a complex
+Cairo blend operator safely fall back to that normal framebuffer renderer.
+
+Open-contour dash patterns are fitted symmetrically from the contour center.
+The nearest whole number of dash/space pairs is scaled slightly to occupy the
+complete path, so both ends receive matching full dashes instead of an
+orphaned remainder pixel. Closed contours fit a whole number of periods around
+their perimeter, preventing a partial dash at the closing seam.
 
 The alternative `dither='edge-aware'` keeps the full Bayer 8x8 pattern in flat
 areas and reduces threshold variation near high-contrast edges. Use
