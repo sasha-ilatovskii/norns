@@ -11,8 +11,8 @@ enum {
 };
 
 typedef struct _sharp_memory_outline_style {
-    uint8_t period_px;
     uint8_t dash_px[SHARP_MEMORY_OUTLINE_TRACK_COUNT];
+    uint8_t space_px[SHARP_MEMORY_OUTLINE_TRACK_COUNT];
     uint8_t phase_px[SHARP_MEMORY_OUTLINE_TRACK_COUNT];
 } sharp_memory_outline_style_t;
 
@@ -22,7 +22,7 @@ sharp_memory_outline_style_t sharp_memory_outline_style(uint8_t level);
 
 // Render a flattened Cairo path as three direction-aware parallel tracks.
 // Each track is one physical Sharp pixel wide when track_width_px is 1.0.
-// The dash period and phase always remain expressed in physical pixels.
+// Dash, space, and phase always remain expressed in physical pixels.
 void sharp_memory_outline_render(cairo_t *path_context,
                                  const cairo_path_t *flat_path,
                                  cairo_surface_t *target,

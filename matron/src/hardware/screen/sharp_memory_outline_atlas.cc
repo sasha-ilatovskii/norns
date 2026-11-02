@@ -16,29 +16,29 @@ struct contour_t {
     bool closed = false;
 };
 
-// A compact eight-physical-pixel period keeps brightness visible on short UI
-// strokes. Levels 1--5 progressively fill the center track, levels 6--9 move
-// that coverage to equal upper and lower tracks, and levels 10--14 combine a
-// solid center with equal periodic side tracks. Keeping both sides identical
-// makes the apparent stroke position independent of path direction. Level 15
-// is a solid three-pixel contour.
+// Compact physical-pixel patterns keep brightness visible on short UI strokes.
+// Levels 1--4 progressively fill the center track, levels 5--8 move increasing
+// coverage to equal upper and lower tracks, levels 9--12 combine all three
+// tracks, and levels 13--15 make the center solid. The side tracks always
+// remain identical, so the apparent stroke position is independent of path
+// direction. Mean and short-stroke raster coverage increase at every level.
 static const sharp_memory_outline_style_t styles[16] = {
-    {1, {0, 0, 0}, {0, 0, 0}},
-    {8, {0, 1, 0}, {0, 0, 0}},
-    {8, {0, 2, 0}, {0, 0, 0}},
-    {8, {0, 3, 0}, {0, 0, 0}},
-    {8, {0, 4, 0}, {0, 0, 0}},
-    {8, {0, 5, 0}, {0, 0, 0}},
-    {8, {3, 0, 3}, {0, 0, 0}},
-    {8, {4, 0, 4}, {0, 0, 0}},
-    {8, {5, 0, 5}, {0, 0, 0}},
-    {8, {6, 0, 6}, {0, 0, 0}},
-    {8, {3, 8, 3}, {0, 0, 0}},
-    {8, {4, 8, 4}, {0, 0, 0}},
-    {8, {5, 8, 5}, {0, 0, 0}},
-    {8, {6, 8, 6}, {0, 0, 0}},
-    {8, {7, 8, 7}, {0, 0, 0}},
-    {8, {8, 8, 8}, {0, 0, 0}},
+    {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+    {{0, 1, 0}, {0, 3, 0}, {0, 0, 0}},
+    {{0, 1, 0}, {0, 1, 0}, {0, 0, 0}},
+    {{0, 2, 0}, {0, 1, 0}, {0, 0, 0}},
+    {{0, 1, 0}, {0, 0, 0}, {0, 0, 0}},
+    {{3, 0, 3}, {2, 0, 2}, {0, 0, 0}},
+    {{2, 0, 2}, {1, 0, 1}, {0, 0, 0}},
+    {{3, 0, 3}, {1, 0, 1}, {0, 0, 0}},
+    {{1, 0, 1}, {0, 0, 0}, {0, 0, 0}},
+    {{4, 1, 4}, {1, 1, 1}, {0, 0, 0}},
+    {{5, 1, 5}, {1, 1, 1}, {0, 0, 0}},
+    {{6, 2, 6}, {1, 2, 1}, {0, 0, 0}},
+    {{1, 2, 1}, {0, 3, 0}, {0, 0, 0}},
+    {{3, 1, 3}, {1, 0, 1}, {0, 0, 0}},
+    {{5, 1, 5}, {1, 0, 1}, {0, 0, 0}},
+    {{1, 1, 1}, {0, 0, 0}, {0, 0, 0}},
 };
 
 static point_t add(point_t a, point_t b) {
@@ -308,6 +308,8 @@ void sharp_memory_outline_render(cairo_t *path_context,
         const uint8_t dash = style.dash_px[track];
         if (dash == 0)
             continue;
+        const uint8_t space = style.space_px[track];
+        const double nominal_period = static_cast<double>(dash + space);
 
         for (const contour_t &contour : contours) {
             const std::vector<point_t> points = offset_contour_points(
@@ -317,20 +319,19 @@ void sharp_memory_outline_render(cairo_t *path_context,
                 continue;
 
             cairo_new_path(context);
-            if (dash >= style.period_px) {
+            if (space == 0) {
                 cairo_set_dash(context, nullptr, 0, 0.0);
                 append_contour(context, points, contour.closed);
             } else if (!contour.closed) {
                 set_fitted_open_dash(context,
                                      total,
                                      static_cast<double>(dash),
-                                     static_cast<double>(style.period_px));
+                                     nominal_period);
                 append_contour(context, points, false);
             } else {
                 // A closed contour has no meaningful center. Fit an integer
                 // number of periods around its perimeter so the dash pattern
                 // reaches the seam in exactly the same state in which it left.
-                const double nominal_period = static_cast<double>(style.period_px);
                 const double cycles = std::max(1.0, std::round(total / nominal_period));
                 const double period = total / cycles;
                 const double scaled_dash = period * dash / nominal_period;

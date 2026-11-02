@@ -177,15 +177,18 @@ atlas then writes its foreground tracks on top. A later fill, image, text, or
 stroke overwrites those pixels in normal painter order, so neither the
 grayscale Cairo stroke nor an older semantic operation can leak through.
 
-Levels 1 through 5 progressively fill only the center track with an
-eight-physical-pixel period. Levels 6 through 9 leave the center empty and draw
-identical upper and lower tracks from `3/8` through `6/8`. Levels 10 through 14
-make the center solid and draw both side tracks from `3/8` through `7/8`.
-Because both sides always have equal coverage, the apparent stroke position
-does not change when path direction reverses. Level 15 makes all three tracks
-solid. Filled paths, images, `poke`, and offscreen images continue through the
-normal 3x3 tile renderer. Frames that use a complex Cairo blend operator safely
-fall back to that normal framebuffer renderer.
+Levels 1 through 4 draw only the center track with `1/3`, `1/1`, `2/1`, and
+solid dash/space patterns. Levels 5 through 8 leave the center empty and draw
+identical upper and lower tracks with `3/2`, `2/1`, `3/1`, and solid patterns.
+Levels 9 and 10 use a `1/1` center with `4/1` and `5/1` sides. Level 11 uses a
+`2/2` center with `6/1` sides, and level 12 combines a `2/3` center with solid
+sides. Levels 13 through 15 make the center solid and use `3/1`, `5/1`, and
+solid sides. Both nominal mean coverage and the rasterized pixel count of a
+four-Cairo-pixel indicator rise strictly from one level to the next. Because
+both sides always have equal coverage, reversing path direction does not move
+the apparent stroke. Filled paths, images, `poke`, and offscreen images continue
+through the normal 3x3 tile renderer. Frames that use a complex Cairo blend
+operator safely fall back to that normal framebuffer renderer.
 
 Open-contour dash patterns are fitted symmetrically from the contour center.
 The nearest whole number of dash/space pairs is scaled slightly to occupy the

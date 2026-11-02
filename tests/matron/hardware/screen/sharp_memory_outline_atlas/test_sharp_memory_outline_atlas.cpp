@@ -2,49 +2,50 @@
 
 #include "hardware/screen/sharp_memory_outline_atlas.h"
 
-TEST_CASE("outline atlas uses three symmetric fill regimes") {
-    const uint8_t expected_periods[16] = {
-        1,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-    };
+TEST_CASE("outline atlas uses four monotonic symmetric fill regimes") {
     const uint8_t expected_dashes[16][SHARP_MEMORY_OUTLINE_TRACK_COUNT] = {
         {0, 0, 0},
         {0, 1, 0},
+        {0, 1, 0},
         {0, 2, 0},
-        {0, 3, 0},
-        {0, 4, 0},
-        {0, 5, 0},
+        {0, 1, 0},
         {3, 0, 3},
-        {4, 0, 4},
-        {5, 0, 5},
-        {6, 0, 6},
-        {3, 8, 3},
-        {4, 8, 4},
-        {5, 8, 5},
-        {6, 8, 6},
-        {7, 8, 7},
-        {8, 8, 8},
+        {2, 0, 2},
+        {3, 0, 3},
+        {1, 0, 1},
+        {4, 1, 4},
+        {5, 1, 5},
+        {6, 2, 6},
+        {1, 2, 1},
+        {3, 1, 3},
+        {5, 1, 5},
+        {1, 1, 1},
+    };
+    const uint8_t expected_spaces[16][SHARP_MEMORY_OUTLINE_TRACK_COUNT] = {
+        {0, 0, 0},
+        {0, 3, 0},
+        {0, 1, 0},
+        {0, 1, 0},
+        {0, 0, 0},
+        {2, 0, 2},
+        {1, 0, 1},
+        {1, 0, 1},
+        {0, 0, 0},
+        {1, 1, 1},
+        {1, 1, 1},
+        {1, 2, 1},
+        {0, 3, 0},
+        {1, 0, 1},
+        {1, 0, 1},
+        {0, 0, 0},
     };
 
     for (uint8_t level = 0; level < 16; ++level) {
         const sharp_memory_outline_style_t style = sharp_memory_outline_style(level);
-        CHECK(style.period_px == expected_periods[level]);
-        for (int track = 0; track < SHARP_MEMORY_OUTLINE_TRACK_COUNT; ++track)
+        for (int track = 0; track < SHARP_MEMORY_OUTLINE_TRACK_COUNT; ++track) {
             CHECK(style.dash_px[track] == expected_dashes[level][track]);
+            CHECK(style.space_px[track] == expected_spaces[level][track]);
+        }
         CHECK(style.phase_px[SHARP_MEMORY_OUTLINE_UPPER] == 0);
         CHECK(style.phase_px[SHARP_MEMORY_OUTLINE_CENTER] == 0);
         CHECK(style.phase_px[SHARP_MEMORY_OUTLINE_LOWER] == 0);
@@ -60,8 +61,7 @@ TEST_CASE("short step indicators retain distinct low brightness levels") {
     cairo_path_t *flat_path = cairo_copy_path_flat(path_context);
 
     size_t previous_count = 0;
-    const uint8_t levels[] = {1, 4, 6, 15};
-    for (uint8_t level : levels) {
+    for (uint8_t level = 1; level <= 15; ++level) {
         cairo_surface_t *target =
             cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 32, 12);
         sharp_memory_outline_render(path_context, flat_path, target, level, 1.0);
@@ -216,8 +216,12 @@ TEST_CASE("outline atlas brightness has strictly increasing mean coverage") {
     for (uint8_t level = 0; level < 16; ++level) {
         const sharp_memory_outline_style_t style = sharp_memory_outline_style(level);
         double coverage = 0.0;
-        for (int track = 0; track < SHARP_MEMORY_OUTLINE_TRACK_COUNT; ++track)
-            coverage += static_cast<double>(style.dash_px[track]) / style.period_px;
+        for (int track = 0; track < SHARP_MEMORY_OUTLINE_TRACK_COUNT; ++track) {
+            const double dash = style.dash_px[track];
+            const double period = dash + style.space_px[track];
+            if (period > 0.0)
+                coverage += dash / period;
+        }
         coverage /= SHARP_MEMORY_OUTLINE_TRACK_COUNT;
         CHECK(coverage > previous);
         previous = coverage;
@@ -400,9 +404,9 @@ TEST_CASE("integer axis-aligned strokes align with Cairo pixel ownership") {
 TEST_CASE("outline style clamps out-of-range brightness") {
     const sharp_memory_outline_style_t maximum = sharp_memory_outline_style(15);
     const sharp_memory_outline_style_t clamped = sharp_memory_outline_style(255);
-    CHECK(clamped.period_px == maximum.period_px);
     for (int track = 0; track < SHARP_MEMORY_OUTLINE_TRACK_COUNT; ++track) {
         CHECK(clamped.dash_px[track] == maximum.dash_px[track]);
+        CHECK(clamped.space_px[track] == maximum.space_px[track]);
         CHECK(clamped.phase_px[track] == maximum.phase_px[track]);
     }
 }
