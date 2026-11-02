@@ -144,9 +144,19 @@ When launching manually, do not use `sudo`: it changes the runtime account and
 may change `HOME`. The CM5 systemd units described below explicitly run as
 `me` with `HOME=/home/me`.
 
-The default configuration uses `/dev/spidev0.0`, line 25 of the `pinctrl-rp1`
-GPIO chip for CS, a 2 MHz SPI clock, and the tested stable rate of 8 frames per
-second. A complete frame takes about 50 ms at that clock rate.
+The CM5 example configuration uses `/dev/spidev0.0`, line 25 of the
+`pinctrl-rp1` GPIO chip for CS, a 4 MHz SPI clock, and 30 frames per second. A
+complete encoded frame is 12,482 bytes and takes about 25 ms on the wire at
+that clock, leaving about 8 ms of each 33.3 ms refresh interval for encoding,
+system calls, and scheduling overhead.
+
+This is an experimental overclock. The LS027B7DH01 datasheet specifies a
+maximum 2 MHz serial clock and 20 Hz frame frequency, so 4 MHz / 30 fps is
+outside the guaranteed electrical and timing limits. The driver's fallback
+configuration remains 2 MHz / 8 fps when these options are omitted. To keep a
+CM5 installation within the panel specification, set `speed_hz=2000000` and
+`fps` no higher than 20. The standalone display test intentionally remains at
+the specified 2 MHz rather than inheriting the runtime overclock.
 
 `dither='tile3x3'` aligns every pattern with one exact 3x3 logical-pixel tile.
 Ten hand-tuned masks provide the integral densities; the fractional density is

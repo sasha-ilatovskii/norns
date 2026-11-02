@@ -12,12 +12,13 @@ _boot.add_io('screen:sharp-memory', {
   cs_chip = 'pinctrl-rp1',
   cs_line = 25,
 
-  -- LS027B7DH01 maximum SPI clock.
-  speed_hz = 2000000,
+  -- Experimental overclock: the LS027B7DH01 datasheet specifies 2 MHz and
+  -- 20 fps maximum. Four MHz leaves enough transfer headroom for 30 full
+  -- 400x240 frames per second; use 2 MHz and at most 20 fps for operation
+  -- within the panel specification.
+  speed_hz = 4000000,
 
-  -- A 400x240 frame takes about 50 ms at the panel's 2 MHz SPI limit. Eight
-  -- fps is the tested stable rate and prevents refresh work from accumulating.
-  fps = 8,
+  fps = 30,
 
   -- Hand-tuned 3x3 tiles align exactly with the 3x screen scale and retain all
   -- 16 norns levels by distributing fractional density across five tiles.

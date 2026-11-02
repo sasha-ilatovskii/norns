@@ -25,7 +25,10 @@
 #define SHARP_MEMORY_HEIGHT 240
 #define SHARP_MEMORY_ROWS_PER_TRANSFER 60
 #define SHARP_MEMORY_DEFAULT_SPEED_HZ 2000000
+#define SHARP_MEMORY_MAX_SPEED_HZ 4000000
 #define SHARP_MEMORY_MIN_SPEED_HZ 1000000
+#define SHARP_MEMORY_SPEC_MAX_FPS 20
+#define SHARP_MEMORY_MAX_FPS 30
 #define SHARP_MEMORY_VCOM_HALF_PERIOD_NS 500000000L
 #define SHARP_MEMORY_DUMP_TRIGGER "/tmp/dump-sharp-frame"
 #define SHARP_MEMORY_DUMP_PATH "/tmp/sharp-frame.pbm"
@@ -204,8 +207,8 @@ static int screen_sharp_memory_config(matron_io_t *io, lua_State *l) {
     priv->cs_line_offset = (unsigned int)cs_line;
 
     priv->fps = config_integer(l, 2, "fps", 8);
-    if (priv->fps < 1 || priv->fps > 20) {
-        fprintf(stderr, "ERROR (screen:sharp-memory) 'fps' must be between 1 and 20\n");
+    if (priv->fps < 1 || priv->fps > SHARP_MEMORY_MAX_FPS) {
+        fprintf(stderr, "ERROR (screen:sharp-memory) 'fps' must be between 1 and 30\n");
         free(priv->cs_chip);
         free(priv->dev);
         priv->cs_chip = NULL;
@@ -215,9 +218,9 @@ static int screen_sharp_memory_config(matron_io_t *io, lua_State *l) {
 
     const int speed_hz = config_integer(l, 2, "speed_hz", SHARP_MEMORY_DEFAULT_SPEED_HZ);
     if (speed_hz < SHARP_MEMORY_MIN_SPEED_HZ ||
-        speed_hz > SHARP_MEMORY_DEFAULT_SPEED_HZ) {
+        speed_hz > SHARP_MEMORY_MAX_SPEED_HZ) {
         fprintf(stderr,
-                "ERROR (screen:sharp-memory) 'speed_hz' must be between 1000000 and 2000000\n");
+                "ERROR (screen:sharp-memory) 'speed_hz' must be between 1000000 and 4000000\n");
         free(priv->cs_chip);
         free(priv->dev);
         priv->cs_chip = NULL;
@@ -262,6 +265,14 @@ static int screen_sharp_memory_config(matron_io_t *io, lua_State *l) {
 
     priv->invert = config_boolean(l, 2, "invert", false);
     priv->stretch = config_boolean(l, 2, "stretch", false);
+
+    if (priv->speed_hz > SHARP_MEMORY_DEFAULT_SPEED_HZ ||
+        priv->fps > SHARP_MEMORY_SPEC_MAX_FPS) {
+        fprintf(stderr,
+                "WARNING (screen:sharp-memory) %u Hz SPI at %d fps exceeds "
+                "the LS027B7DH01 2 MHz / 20 Hz specification\n",
+                priv->speed_hz, priv->fps);
+    }
     return 0;
 }
 
