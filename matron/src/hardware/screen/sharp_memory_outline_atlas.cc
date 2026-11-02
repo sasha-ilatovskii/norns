@@ -17,10 +17,11 @@ struct contour_t {
 };
 
 // A compact eight-physical-pixel period keeps brightness visible on short UI
-// strokes. Levels 1--6 progressively fill the center track, level 7 makes it
-// solid, and levels 8--14 add equal upper and lower tracks. Keeping both side
-// tracks identical makes the apparent stroke position independent of path
-// direction. Level 15 is a solid three-pixel contour.
+// strokes. Levels 1--5 progressively fill the center track, levels 6--9 move
+// that coverage to equal upper and lower tracks, and levels 10--14 combine a
+// solid center with equal periodic side tracks. Keeping both sides identical
+// makes the apparent stroke position independent of path direction. Level 15
+// is a solid three-pixel contour.
 static const sharp_memory_outline_style_t styles[16] = {
     {1, {0, 0, 0}, {0, 0, 0}},
     {8, {0, 1, 0}, {0, 0, 0}},
@@ -28,10 +29,10 @@ static const sharp_memory_outline_style_t styles[16] = {
     {8, {0, 3, 0}, {0, 0, 0}},
     {8, {0, 4, 0}, {0, 0, 0}},
     {8, {0, 5, 0}, {0, 0, 0}},
-    {8, {0, 6, 0}, {0, 0, 0}},
-    {8, {0, 8, 0}, {0, 0, 0}},
-    {8, {1, 8, 1}, {0, 0, 0}},
-    {8, {2, 8, 2}, {0, 0, 0}},
+    {8, {3, 0, 3}, {0, 0, 0}},
+    {8, {4, 0, 4}, {0, 0, 0}},
+    {8, {5, 0, 5}, {0, 0, 0}},
+    {8, {6, 0, 6}, {0, 0, 0}},
     {8, {3, 8, 3}, {0, 0, 0}},
     {8, {4, 8, 4}, {0, 0, 0}},
     {8, {5, 8, 5}, {0, 0, 0}},

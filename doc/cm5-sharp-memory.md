@@ -177,14 +177,15 @@ atlas then writes its foreground tracks on top. A later fill, image, text, or
 stroke overwrites those pixels in normal painter order, so neither the
 grayscale Cairo stroke nor an older semantic operation can leak through.
 
-Levels 1 through 6 progressively fill only the center track with an
-eight-physical-pixel period, and level 7 makes that track solid. Levels 8
-through 14 keep the center solid while adding identical upper and lower tracks
-from `1/8` through `7/8`. Because both sides always have equal coverage, the
-apparent stroke position does not change when path direction reverses. Level
-15 makes all three tracks solid. Filled paths, images, `poke`, and offscreen
-images continue through the normal 3x3 tile renderer. Frames that use a complex
-Cairo blend operator safely fall back to that normal framebuffer renderer.
+Levels 1 through 5 progressively fill only the center track with an
+eight-physical-pixel period. Levels 6 through 9 leave the center empty and draw
+identical upper and lower tracks from `3/8` through `6/8`. Levels 10 through 14
+make the center solid and draw both side tracks from `3/8` through `7/8`.
+Because both sides always have equal coverage, the apparent stroke position
+does not change when path direction reverses. Level 15 makes all three tracks
+solid. Filled paths, images, `poke`, and offscreen images continue through the
+normal 3x3 tile renderer. Frames that use a complex Cairo blend operator safely
+fall back to that normal framebuffer renderer.
 
 Open-contour dash patterns are fitted symmetrically from the contour center.
 The nearest whole number of dash/space pairs is scaled slightly to occupy the

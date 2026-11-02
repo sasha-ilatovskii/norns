@@ -2,7 +2,7 @@
 
 #include "hardware/screen/sharp_memory_outline_atlas.h"
 
-TEST_CASE("outline atlas uses compact periods and ordered track fill") {
+TEST_CASE("outline atlas uses three symmetric fill regimes") {
     const uint8_t expected_periods[16] = {
         1,
         8,
@@ -28,10 +28,10 @@ TEST_CASE("outline atlas uses compact periods and ordered track fill") {
         {0, 3, 0},
         {0, 4, 0},
         {0, 5, 0},
-        {0, 6, 0},
-        {0, 8, 0},
-        {1, 8, 1},
-        {2, 8, 2},
+        {3, 0, 3},
+        {4, 0, 4},
+        {5, 0, 5},
+        {6, 0, 6},
         {3, 8, 3},
         {4, 8, 4},
         {5, 8, 5},
